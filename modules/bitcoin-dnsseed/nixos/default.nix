@@ -31,6 +31,7 @@ let
     soaRname = cfg.soaRname;
     seedNodes = network.seedNodes;
     threads = network.threads;
+    crawlRate = network.crawlRate;
     dbFile = network.dbFile;
     dumpFile = network.dumpFile;
     onionProxy = cfg.proxies.onionProxy;
@@ -133,6 +134,12 @@ in
             description = "Crawler thread count.";
           };
 
+          crawlRate = lib.mkOption {
+            type = lib.types.nullOr lib.types.ints.positive;
+            default = null;
+            description = "Maximum aggregate crawl attempts to start per second; unset derives a rate from threads.";
+          };
+
           dbFile = lib.mkOption {
             type = lib.types.str;
             default = "sqlite.db";
@@ -189,6 +196,12 @@ in
             type = lib.types.ints.positive;
             default = 6;
             description = "Crawler thread count.";
+          };
+
+          crawlRate = lib.mkOption {
+            type = lib.types.nullOr lib.types.ints.positive;
+            default = null;
+            description = "Maximum aggregate crawl attempts to start per second; unset derives a rate from threads.";
           };
 
           dbFile = lib.mkOption {

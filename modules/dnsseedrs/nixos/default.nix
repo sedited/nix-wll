@@ -103,6 +103,12 @@ in
             description = "Number of crawler threads.";
           };
 
+          crawlRate = lib.mkOption {
+            type = lib.types.nullOr lib.types.ints.positive;
+            default = null;
+            description = "Maximum aggregate crawl attempts to start per second; unset derives a rate from threads.";
+          };
+
           bind = lib.mkOption {
             type = lib.types.listOf lib.types.str;
             default = [ ];
@@ -163,6 +169,7 @@ in
                   onion-proxy = icfg.onionProxy;
                   i2p-proxy = icfg.i2pProxy;
                   threads = icfg.threads;
+                  crawl-rate = icfg.crawlRate;
                   bind = icfg.bind;
                   dnssec-keys = icfg.dnssecKeys;
                   asmap = icfg.asmap;

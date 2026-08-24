@@ -60,3 +60,7 @@ systemd ordering details.
 - `services.bitcoinDnsSeed.proxies.*`
 - `services.bitcoinDnsSeed.coredns.*`
 - `services.bitcoinDnsSeed.caddy.*`
+
+The `mainnet.crawlRate` and `signet.crawlRate` options cap aggregate crawl
+attempts per second. Leave them unset to use dnsseedrs' adaptive default based
+on the configured thread count.

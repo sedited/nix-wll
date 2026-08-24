@@ -18,6 +18,7 @@ DNSSEC secrets, Caddy seed dumps, and local Tor/I2P proxies.
     serverName = "ns.example.org";
     soaRname = "admin.example.org";
     seedNodes = [ "1.2.3.4:8333" ];
+    crawlRate = 10;
     bind = [
       "udp://127.0.0.1:5353"
       "tcp://127.0.0.1:5353"
@@ -41,4 +42,6 @@ DNSSEC secrets, Caddy seed dumps, and local Tor/I2P proxies.
 - `services.dnsseedrs.<name>.dnssecKeys`
 - `services.dnsseedrs.<name>.onionProxy`
 - `services.dnsseedrs.<name>.i2pProxy`
+- `services.dnsseedrs.<name>.threads`
+- `services.dnsseedrs.<name>.crawlRate`
 - `services.dnsseedrs.<name>.extraArgs`
