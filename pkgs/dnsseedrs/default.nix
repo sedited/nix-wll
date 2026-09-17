@@ -15,8 +15,8 @@ rustPlatform.buildRustPackage rec {
   src = fetchFromGitHub {
     owner = "willcl-ark";
     repo = "dnsseedrs";
-    rev = "160687a52863c7e7492bbec970b24c3ab904e45e";
-    hash = "sha256-e/aFYpzTkYX3DZJgvBjaWuf6nunACifDMGQ9eiqE9g8=";
+    rev = "2e8f7969405935c366afee6d889e255653c5bb57";
+    hash = "sha256-znx7iAWDVIworDV9EB17I6zLME3fgiyTNtyo292aUCw=";
   };
 
   cargoHash = "sha256-IMAhmMENMbZO+S57atNHpibr46vSlj1g7zYeQ2Djo2w=";
