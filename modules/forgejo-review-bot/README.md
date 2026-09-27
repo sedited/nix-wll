@@ -10,6 +10,14 @@ reads, per-file diff reads, and literal code search. Large patches are replaced
 by a changed-file list so the model can read relevant diffs on demand. It never
 builds, runs, or tests pull request code.
 
+The model can also search and read other public issues and pull requests in the
+same repository, including a small sample of ordinary comments. The current PR
+is excluded from these tools, so its comments cannot influence the review.
+These reads use no Forgejo credentials and are limited to four calls per review.
+It can inspect up to 20 lines of merge-base blame and read a related ancestor
+commit's message and file diff, with four history calls per review. Tool output
+is capped.
+
 The bot writes at most one comment per pull request. New reviews edit the
 existing bot-owned comment when the content changes, and leave it untouched
 when it is already current.

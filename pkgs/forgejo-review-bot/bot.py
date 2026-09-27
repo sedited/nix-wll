@@ -31,6 +31,9 @@ MAX_TOOL_BYTES = 12_000
 MAX_TOOL_CALLS = 24
 MAX_MODEL_TURNS = 10
 MAX_OUTPUT_TOKENS = 6_000
+MAX_DISCUSSION_RESPONSE_BYTES = 500_000
+MAX_CONTEXT_CALLS = 4
+MAX_HISTORY_CALLS = 4
 SHA = re.compile(r"^[0-9a-f]{40}$")
 BRANCH = re.compile(r"^[A-Za-z0-9._/-]+$")
 DEFAULT_PROMPT_FILE = Path(__file__).with_name("prompt.md")
@@ -70,6 +73,34 @@ TOOLS = [
      "parameters": {"type": "object", "properties": {
          "query": {"type": "string", "description": "Literal code or path fragment"}},
          "required": ["query"], "additionalProperties": False}},
+    {"type": "function", "name": "search_discussions", "strict": True,
+     "description": "Search this repository's other issues and PRs for a specific "
+                    "term. The current PR is excluded. Open a relevant result "
+                    "with read_discussion.",
+     "parameters": {"type": "object", "properties": {
+         "query": {"type": "string", "description": "Specific term or phrase"}},
+         "required": ["query"], "additionalProperties": False}},
+    {"type": "function", "name": "read_discussion", "strict": True,
+     "description": "Read another same-repository issue or PR by number, "
+                    "including its title, description, and a small sample of "
+                    "ordinary comments. The current PR is excluded.",
+     "parameters": {"type": "object", "properties": {
+         "number": {"type": "integer", "description": "Issue or PR number"}},
+         "required": ["number"], "additionalProperties": False}},
+    {"type": "function", "name": "blame_base", "strict": True,
+     "description": "Trace up to 20 lines of an existing tracked file at the PR merge "
+                    "base to the last commits that changed them.",
+     "parameters": {"type": "object", "properties": {
+         "path": {"type": "string", "description": "Repository-relative file path"},
+         "start_line": {"type": "integer", "description": "First line, starting at 1"}},
+         "required": ["path", "start_line"], "additionalProperties": False}},
+    {"type": "function", "name": "read_commit", "strict": True,
+     "description": "Read an ancestor commit's message and bounded diff for one "
+                    "tracked file at the PR merge base.",
+     "parameters": {"type": "object", "properties": {
+         "commit": {"type": "string", "description": "Full commit SHA from blame_base"},
+         "path": {"type": "string", "description": "Repository-relative file path"}},
+         "required": ["commit", "path"], "additionalProperties": False}},
 ]
 
 
@@ -318,7 +349,63 @@ def search_code(checkout, query):
         "\n[Results truncated]" if len(output) > MAX_TOOL_BYTES else "")
 
 
-def openai_review(api_key, review, checkout, debug=None):
+def blame_base(checkout, base_files, base, path, start_line):
+    if (not isinstance(path, str) or path not in base_files
+            or not isinstance(start_line, int) or isinstance(start_line, bool)
+            or not 1 <= start_line <= 100_000):
+        return "Invalid path or line at the PR merge base."
+    try:
+        output = git(checkout, "blame", "--no-progress", "--line-porcelain",
+                     "-L", f"{start_line},+20", base, "--", path)
+    except subprocess.CalledProcessError:
+        return "No lines at that location in the PR merge base."
+    summaries = {}
+    lines = []
+    current = None
+    for line in output.splitlines():
+        header = re.match(r"^([0-9a-f]{40}) \d+ (\d+)(?: \d+)?$", line)
+        if header:
+            current = (header.group(1), int(header.group(2)))
+        elif line.startswith("summary ") and current:
+            summaries[current[0]] = line[8:]
+        elif line.startswith("\t") and current:
+            lines.append((current[0], current[1], line[1:]))
+    result = f"{path} at merge base {base}:\n"
+    for commit, number, content in lines:
+        item = f"{number}: {commit} {summaries.get(commit, '')}: {content}\n"
+        if len((result + item).encode()) > MAX_TOOL_BYTES:
+            return result + "[Results truncated]"
+        result += item
+    return result if lines else "No blame results."
+
+
+def read_commit(checkout, base_files, base, commit, path):
+    if (not isinstance(commit, str) or not SHA.fullmatch(commit)
+            or not isinstance(path, str) or path not in base_files):
+        return "Invalid commit or path at the PR merge base."
+    ancestor = subprocess.run(
+        ["git", "-C", str(checkout), "merge-base", "--is-ancestor", commit, base],
+        capture_output=True, timeout=30,
+    )
+    if ancestor.returncode:
+        return "Commit is not an ancestor of the PR merge base."
+    process = subprocess.Popen(
+        ["git", "-C", str(checkout), "show", "--format=fuller",
+         "--no-ext-diff", "--no-color", commit, "--", path],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+    )
+    try:
+        output = process.stdout.read(MAX_TOOL_BYTES + 1)
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=10)
+        process.stdout.close()
+    return output[:MAX_TOOL_BYTES].decode(errors="replace") + (
+        "\n[Commit output truncated]" if len(output) > MAX_TOOL_BYTES else "")
+
+
+def openai_review(api_key, review, checkout, debug=None, current_pr=None):
     prompt = instructions()
     files = tracked_files(checkout)
     inputs = [{"role": "user", "content": review}]
@@ -329,6 +416,8 @@ def openai_review(api_key, review, checkout, debug=None):
                       "review_input_sha256": hashlib.sha256(review_bytes).hexdigest(),
                       "turns": [], "tools": []})
     calls_used = 0
+    context_calls = 0
+    history_calls = 0
     merge_base = None
     base_files = None
     changed_paths = None
@@ -410,10 +499,41 @@ def openai_review(api_key, review, checkout, debug=None):
                                                args.get("path"), args.get("start_line"))
                         elif call["name"] == "search_code":
                             answer = search_code(checkout, args.get("query"))
+                        elif call["name"] in {"search_discussions", "read_discussion"}:
+                            if current_pr is None:
+                                answer = "Discussion lookup unavailable without the current PR number."
+                            elif context_calls >= MAX_CONTEXT_CALLS:
+                                answer = "Discussion lookup limit reached."
+                            else:
+                                context_calls += 1
+                                if call["name"] == "search_discussions":
+                                    answer = search_discussions(args.get("query"), current_pr)
+                                else:
+                                    answer = read_discussion(args.get("number"), current_pr)
+                        elif call["name"] in {"blame_base", "read_commit"}:
+                            if history_calls >= MAX_HISTORY_CALLS:
+                                answer = "History lookup limit reached."
+                            else:
+                                history_calls += 1
+                                if merge_base is None:
+                                    merge_base = git(checkout, "merge-base", "refs/review-bot/base",
+                                                     "HEAD").strip()
+                                if base_files is None:
+                                    base_files = tracked_files_at(checkout, merge_base)
+                                if call["name"] == "blame_base":
+                                    answer = blame_base(checkout, base_files, merge_base,
+                                                        args.get("path"), args.get("start_line"))
+                                else:
+                                    answer = read_commit(checkout, base_files, merge_base,
+                                                         args.get("commit"), args.get("path"))
                         else:
                             answer = "Unknown tool."
                     except (KeyError, TypeError, ValueError):
                         answer = "Invalid tool arguments."
+                    except urllib.error.HTTPError as exc:
+                        answer = f"Discussion lookup returned HTTP {exc.code}."
+                    except (urllib.error.URLError, TimeoutError, subprocess.CalledProcessError):
+                        answer = "Context lookup failed; continue with available evidence."
                 inputs.append({"type": "function_call_output",
                                "call_id": call["call_id"], "output": answer})
                 if debug is not None:
@@ -448,6 +568,93 @@ def forgejo_request(token, path, method="GET", data=None):
     )
     with urllib.request.urlopen(request, timeout=30) as response:
         return json.load(response)
+
+
+def public_discussion_request(path):
+    """Read only discussion data available without Forgejo credentials."""
+    require_config()
+    request = urllib.request.Request(
+        f"{FORGEJO_API}{path}",
+        headers={"Accept": "application/json", "User-Agent": "ForgejoReviewBot/1.0"},
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        content = response.read(MAX_DISCUSSION_RESPONSE_BYTES + 1)
+    if len(content) > MAX_DISCUSSION_RESPONSE_BYTES:
+        raise ValueError("Public discussion response exceeds context limit")
+    return json.loads(content)
+
+
+def search_discussions(query, current_pr):
+    if (not isinstance(query, str) or not 3 <= len(query) <= 100
+            or any(char in query for char in "\r\n\x00")):
+        return "Search query must be 3 to 100 characters on one line."
+    path = "/issues?state=all&limit=10&q=" + urllib.parse.quote(query)
+    try:
+        issues = public_discussion_request(path)
+    except ValueError:
+        return "Public search response is unavailable or exceeds the context limit."
+    if not isinstance(issues, list):
+        return "Forgejo returned invalid search results."
+    result = "Public issue and PR matches in this repository:\n"
+    for issue in issues[:10]:
+        if (not isinstance(issue, dict) or not isinstance(issue.get("number"), int)
+                or issue["number"] == current_pr):
+            continue
+        kind = "PR" if issue.get("pull_request") else "Issue"
+        title = str(issue.get("title") or "").replace("\n", " ")[:200]
+        number = issue["number"]
+        url_kind = "pulls" if kind == "PR" else "issues"
+        item = f"{kind} #{number}: {title} ({REPOSITORY_URL}/{url_kind}/{number})\n"
+        if len((result + item).encode()) > MAX_TOOL_BYTES:
+            return result + "[Results truncated]"
+        result += item
+    return result if len(result.splitlines()) > 1 else "No matching discussions."
+
+
+def read_discussion(number, current_pr):
+    if (not isinstance(number, int) or isinstance(number, bool)
+            or not 1 <= number <= 10_000_000):
+        return "Invalid issue or PR number."
+    if number == current_pr:
+        return "The current PR's discussion is excluded from this review."
+    try:
+        issue = public_discussion_request(f"/issues/{number}")
+    except ValueError:
+        return "Public discussion is unavailable or exceeds the context limit."
+    if not isinstance(issue, dict) or issue.get("number") != number:
+        return "Forgejo returned an invalid discussion."
+    kind = "PR" if issue.get("pull_request") else "Issue"
+    url_kind = "pulls" if kind == "PR" else "issues"
+    title = str(issue.get("title") or "")[:300]
+    body = str(issue.get("body") or "")[:3000]
+    result = (f"{kind} #{number}: {title}\n"
+              f"{REPOSITORY_URL}/{url_kind}/{number}\n"
+              f"Description:\n{body}\n")
+    if len(result.encode()) > MAX_TOOL_BYTES:
+        return (result.encode()[:MAX_TOOL_BYTES].decode(errors="replace")
+                + "\n[Description truncated]")
+    try:
+        comments = public_discussion_request(f"/issues/{number}/comments?limit=20&page=1")
+    except ValueError:
+        return result + "Comments exceed the public context response limit."
+    if not isinstance(comments, list):
+        return result + "Forgejo returned invalid comments."
+    human = [comment for comment in comments if isinstance(comment, dict)
+             and COMMENT_MARKER not in str(comment.get("body") or "")]
+    selected = human[:2] + human[-6:] if len(human) > 8 else human
+    result += f"Selected comments ({len(selected)} of {len(human)}):\n"
+    seen = set()
+    for comment in selected:
+        if comment.get("id") in seen:
+            continue
+        seen.add(comment.get("id"))
+        author = (comment.get("user") or {}).get("login") or comment.get("original_author") or "unknown"
+        content = str(comment.get("body") or "")[:1000]
+        item = f"{author}: {content}\n"
+        if len((result + item).encode()) > MAX_TOOL_BYTES:
+            return result + "[Comments truncated]"
+        result += item
+    return result
 
 
 def pull_request_context(token, number):
@@ -636,7 +843,8 @@ def worker(jobs, state_dir, api_key, forgejo_token, bot_login):
                 continue
             debug = {"skip": skip} if skip else {}
             stage = "model"
-            content = f"Skipped: {skip}" if skip else openai_review(api_key, review, checkout, debug)
+            content = f"Skipped: {skip}" if skip else openai_review(
+                api_key, review, checkout, debug, current_pr=number)
             stage = "publish"
             result = publish_review(forgejo_token, number, bot_login,
                                     base_sha, head_sha, content, debug)

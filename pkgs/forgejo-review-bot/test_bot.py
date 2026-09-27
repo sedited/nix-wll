@@ -207,6 +207,137 @@ class BotTests(unittest.TestCase):
                 bot.pull_request_context("token", 42)
         request.assert_called_with("token", "/issues/42")
 
+    def test_public_discussion_request_sends_no_token_and_limits_response(self):
+        class Response:
+            def __init__(self, body):
+                self.body = body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+            def read(self, size):
+                return self.body[:size]
+
+        with patch.object(bot.urllib.request, "urlopen",
+                          return_value=Response(b'{"number": 42}')) as send:
+            self.assertEqual(bot.public_discussion_request("/issues/42"),
+                             {"number": 42})
+        request = send.call_args.args[0]
+        self.assertNotIn("Authorization", request.headers)
+        self.assertEqual(request.full_url,
+                         "https://git.fish.foo/api/v1/repos/bitcoin/bitcoin/issues/42")
+        with patch.object(bot.urllib.request, "urlopen",
+                          return_value=Response(b"x" * (bot.MAX_DISCUSSION_RESPONSE_BYTES + 1))):
+            with self.assertRaisesRegex(ValueError, "context limit"):
+                bot.public_discussion_request("/issues/42")
+
+    def test_discussion_search_and_read_are_bounded_and_exclude_bot_comment(self):
+        issue = {"number": 42, "pull_request": {"html_url": "ignored"},
+                 "title": "Fix a fee edge case", "body": "Reason for the change"}
+        comments = [{"id": i, "user": {"login": "reviewer"},
+                     "body": f"Comment {i}"} for i in range(12)]
+        comments.append({"id": 99, "user": {"login": "ralph"},
+                         "body": bot.COMMENT_MARKER + " Bot review"})
+
+        def request(path):
+            if path.startswith("/issues?"):
+                return [issue]
+            if path == "/issues/42":
+                return issue
+            if path.startswith("/issues/42/comments?"):
+                return comments
+            self.fail(path)
+
+        with patch.object(bot, "public_discussion_request", side_effect=request) as get:
+            matches = bot.search_discussions("fee edge", 99)
+            discussion = bot.read_discussion(42, 99)
+        self.assertIn("PR #42: Fix a fee edge case", matches)
+        self.assertIn("q=fee%20edge", get.call_args_list[0].args[0])
+        self.assertIn("Reason for the change", discussion)
+        self.assertIn("Selected comments (8 of 12)", discussion)
+        self.assertIn("Comment 0", discussion)
+        self.assertIn("Comment 11", discussion)
+        self.assertNotIn("Comment 4", discussion)
+        self.assertNotIn("Bot review", discussion)
+        self.assertEqual(bot.read_discussion(-1, 99), "Invalid issue or PR number.")
+
+    def test_current_pr_is_excluded_before_any_discussion_fetch(self):
+        with patch.object(bot, "public_discussion_request", return_value=[
+                {"number": 42, "title": "Current PR", "pull_request": {}},
+                {"number": 41, "title": "Earlier PR", "pull_request": {}}]) as get:
+            self.assertNotIn("Current PR", bot.search_discussions("change", 42))
+            self.assertIn("Earlier PR", bot.search_discussions("change", 42))
+            self.assertIn("excluded", bot.read_discussion(42, 42))
+        self.assertEqual(get.call_count, 2)
+
+    def test_model_cannot_read_current_pr_discussion(self):
+        responses = [
+            {"status": "completed", "output": [{"type": "function_call",
+                "id": "fc_1", "call_id": "call_1", "name": "read_discussion",
+                "arguments": '{"number":42}'}]},
+            {"status": "completed", "output": [{"type": "message",
+                "content": [{"type": "output_text", "text": "No findings."}]}]},
+        ]
+        requests = []
+
+        class Response:
+            def __init__(self, value):
+                self.value = value
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+            def read(self, *args):
+                return json.dumps(self.value).encode()
+
+        def send(request, timeout):
+            requests.append(json.loads(request.data))
+            return Response(responses.pop(0))
+
+        with patch.object(bot.urllib.request, "urlopen", side_effect=send), \
+                patch.object(bot, "tracked_files", return_value={}), \
+                patch.object(bot, "public_discussion_request") as fetch:
+            self.assertEqual(bot.openai_review("key", "patch", Path("/unused"),
+                                                current_pr=42), "No findings.")
+        fetch.assert_not_called()
+        self.assertIn("current PR's discussion is excluded",
+                      requests[1]["input"][-1]["output"])
+
+    def test_blame_and_commit_are_limited_to_base_history(self):
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = Path(directory)
+            subprocess.run(["git", "-C", directory, "init", "-q"], check=True)
+            path = checkout / "code.cpp"
+            path.write_text("old guard\nunchanged\n")
+            subprocess.run(["git", "-C", directory, "add", "code.cpp"], check=True)
+            commit = ["git", "-C", directory, "-c", "user.name=Test",
+                      "-c", "user.email=test@example.com", "commit", "-qm"]
+            subprocess.run(commit + ["Guard the old case"], check=True)
+            base = bot.git(checkout, "rev-parse", "HEAD").strip()
+            path.write_text("new guard\nunchanged\n")
+            subprocess.run(["git", "-C", directory, "add", "code.cpp"], check=True)
+            subprocess.run(commit + ["PR change"], check=True)
+            head = bot.git(checkout, "rev-parse", "HEAD").strip()
+            base_files = bot.tracked_files_at(checkout, base)
+
+            blame = bot.blame_base(checkout, base_files, base, "code.cpp", 1)
+            self.assertIn(base, blame)
+            self.assertIn("old guard", blame)
+            self.assertIn("Guard the old case", blame)
+            details = bot.read_commit(checkout, base_files, base, base, "code.cpp")
+            self.assertIn("Guard the old case", details)
+            self.assertIn("+old guard", details)
+            self.assertIn("not an ancestor", bot.read_commit(
+                checkout, base_files, base, head, "code.cpp"))
+            self.assertIn("Invalid", bot.blame_base(
+                checkout, base_files, base, "../code.cpp", 1))
+
     def test_openai_request_disables_storage(self):
         class Response:
             def __enter__(self):
@@ -515,7 +646,8 @@ class BotTests(unittest.TestCase):
         self.assertIn("outcome=already-reviewed", "\n".join(logs.output))
 
     def test_worker_logs_created_outcome_with_model_metrics(self):
-        def review(api_key, review_input, checkout, debug):
+        def review(api_key, review_input, checkout, debug, current_pr):
+            self.assertEqual(current_pr, 42)
             debug.update({"turns": [{"input_tokens": 100, "cached_tokens": 20,
                                      "cache_write_tokens": 10, "output_tokens": 5,
                                      "elapsed_seconds": 1.25}],
