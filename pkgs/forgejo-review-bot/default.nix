@@ -35,6 +35,8 @@ stdenvNoCC.mkDerivation {
       install -Dm644 "$audit" $out/libexec/forgejo-review-bot/"$audit"
       install -Dm644 "$audit" $out/share/forgejo-review-bot/"$audit"
     done
+    install -Dm644 audits/models.json $out/libexec/forgejo-review-bot/audits/models.json
+    install -Dm644 audits/models.json $out/share/forgejo-review-bot/audits/models.json
     makeWrapper ${python3.interpreter} $out/bin/forgejo-review-bot \
       --add-flags $out/libexec/forgejo-review-bot/bot.py \
       --prefix PATH : ${lib.makeBinPath [ git ]}

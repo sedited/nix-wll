@@ -18,13 +18,19 @@ It can inspect up to 20 lines of merge-base blame and read a related ancestor
 commit's message and file diff, with four history calls per review. Tool output
 is capped.
 
-Before the main Sol review, four focused Luna calls independently check state
-and failure behavior, public contracts and release notes, test evidence, and
-documented developer conventions. The last call receives
-`doc/developer-notes.md` from the PR merge base. Sol receives their short
-candidate findings and verifies them before publishing. Luna calls do not run
-code or read current PR discussion. A failed audit does not prevent Sol review.
-The collapsed comment debug section includes their usage and estimated cost.
+Four focused reviews check state and failure behavior, public contracts and
+release notes, test evidence, and documented developer conventions. They run
+alongside an independent checkout-backed review. The developer-notes call
+receives `doc/developer-notes.md` from the PR merge base. A second checkout-
+backed review verifies every distinct candidate, then a context-free collator
+formats the accepted findings for the single bot comment. The four focused
+reviews do not run code or read current PR discussion. Their failures do not
+prevent independent review. The collapsed comment debug section includes
+stage status, usage, and estimated cost without raw candidate text.
+
+`auditPromptDir` contains the four audit prompts, verifier and collator prompts,
+and `models.json`. Each stage's model can be changed separately in that file;
+cost estimates are available for the configured GPT-6 Sol and Luna models.
 
 The bot writes at most one comment per pull request. New reviews edit the
 existing bot-owned comment when the content changes, and leave it untouched

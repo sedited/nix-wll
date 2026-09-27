@@ -626,16 +626,68 @@ class BotTests(unittest.TestCase):
                 patch.object(bot, "pull_request_context", return_value=("Title", "Body")), \
                 patch.object(bot, "collect_review",
                              return_value=("b" * 40, "a" * 40, "review input", None)), \
-                patch.object(bot, "run_audits", return_value="\nAudit leads"), \
-                patch.object(bot, "openai_review", return_value="New review.") as model, \
+                patch.object(bot, "review_with_independent_passes",
+                             return_value="New review.") as model, \
                 patch.object(bot, "publish_review", return_value="updated") as publish:
             with self.assertRaises(StopIteration):
                 bot.worker(JobSource((42, "master", "a" * 40, "opened", True)),
                            Path("/unused"), "openai-key", "forgejo-token", "review-bot")
         find.assert_not_called()
         model.assert_called_once()
-        self.assertIn("Audit leads", model.call_args.args[1])
+        self.assertEqual(model.call_args.args[1], "review input")
         publish.assert_called_once()
+
+    def test_independent_review_precedes_candidate_verification_and_formatting(self):
+        calls = []
+
+        def audit(api_key, review, checkout, debug):
+            self.assertEqual(review, "Original PR input")
+            debug["audits"] = []
+            return "Focused Luna reviews:\nstate:\nLuna finding"
+
+        def model(api_key, review, checkout, debug, current_pr, prompt=None,
+                  model=None):
+            calls.append(("sol", review, prompt))
+            if prompt is None:
+                self.assertEqual(review, "Original PR input")
+                return "Independent finding"
+            self.assertIn("Independent finding", review)
+            self.assertIn("Luna finding", review)
+            self.assertIn("Original PR input", review)
+            return "ACCEPT Independent finding; REJECT Luna finding"
+
+        def collate(api_key, name, prompt, review):
+            calls.append(("collator", review, prompt))
+            self.assertEqual(name, "collator")
+            self.assertNotIn("Original PR input", review)
+            self.assertIn("Independent finding", review)
+            self.assertIn("REJECT Luna finding", review)
+            return "##### 🟠 Major\nIndependent finding", {
+                "name": "collator", "model": "gpt-6-luna", "status": "completed",
+                "output_truncated": False}
+
+        debug = {}
+        with patch.object(bot, "run_audits", side_effect=audit), \
+                patch.object(bot, "openai_review", side_effect=model), \
+                patch.object(bot, "run_audit", side_effect=collate):
+            result = bot.review_with_independent_passes(
+                "key", "Original PR input", Path("/unused"), 42, debug)
+        self.assertIn("Independent finding", result)
+        self.assertEqual([call[0] for call in calls], ["sol", "sol", "collator"])
+        self.assertIn("independent_review_sha256", debug)
+        self.assertIn("verification_output_sha256", debug)
+
+    def test_incomplete_collation_prevents_publication(self):
+        debug = {}
+        with patch.object(bot, "run_audits", return_value="No candidate finding."), \
+                patch.object(bot, "openai_review", return_value="No candidate finding."), \
+                patch.object(bot, "run_audit", return_value=(
+                    "Audit unavailable.", {"status": "incomplete",
+                                           "output_truncated": False})):
+            with self.assertRaisesRegex(ValueError, "collator"):
+                bot.review_with_independent_passes(
+                    "key", "PR input", Path("/unused"), 42, debug)
+        self.assertEqual(debug["pipeline_stage"], "collation")
 
     def test_publish_creates_then_edits_one_bot_comment(self):
         comments = [{"id": 1, "user": {"login": "someone-else"},
@@ -748,7 +800,7 @@ class BotTests(unittest.TestCase):
         self.assertIn("outcome=already-reviewed", "\n".join(logs.output))
 
     def test_worker_logs_created_outcome_with_model_metrics(self):
-        def review(api_key, review_input, checkout, debug, current_pr):
+        def review(api_key, review_input, checkout, current_pr, debug):
             self.assertEqual(current_pr, 42)
             debug.update({"turns": [{"input_tokens": 100, "cached_tokens": 20,
                                      "cache_write_tokens": 10, "output_tokens": 5,
@@ -760,8 +812,7 @@ class BotTests(unittest.TestCase):
                 patch.object(bot, "pull_request_context", return_value=("Title", "Body")), \
                 patch.object(bot, "collect_review",
                              return_value=("b" * 40, "a" * 40, "review input", None)), \
-                patch.object(bot, "run_audits", return_value="\nAudit leads"), \
-                patch.object(bot, "openai_review", side_effect=review), \
+                patch.object(bot, "review_with_independent_passes", side_effect=review), \
                 patch.object(bot, "publish_review", return_value="created"):
             with self.assertLogs(level="INFO") as logs, self.assertRaises(StopIteration):
                 bot.worker(JobSource((42, "master", "a" * 40, "synchronize", False)),

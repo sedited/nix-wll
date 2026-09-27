@@ -96,7 +96,7 @@ in
       type = lib.types.path;
       default = "${cfg.package}/share/forgejo-review-bot/audits";
       defaultText = lib.literalExpression "\"\${config.services.forgejoReviewBot.package}/share/forgejo-review-bot/audits\"";
-      description = "Directory containing the common and four focused Luna audit prompts.";
+      description = "Directory containing review stage prompts and models.json.";
     };
 
     listenAddress = lib.mkOption {

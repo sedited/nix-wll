@@ -43,8 +43,12 @@ BRANCH = re.compile(r"^[A-Za-z0-9._/-]+$")
 DEFAULT_PROMPT_FILE = Path(__file__).with_name("prompt.md")
 DEFAULT_AUDIT_DIR = Path(__file__).with_name("audits")
 AUDIT_NAMES = ("state", "public_contract", "tests", "developer_notes")
+MODEL_NAMES = ("independent", *AUDIT_NAMES, "verifier", "collator")
+MODEL_RATES = {"gpt-6-luna": (0.1, 0.01, 0.125, 0.5),
+               "gpt-6-sol": (2, 0.2, 2.5, 10)}
 INSTRUCTIONS = None
 AUDIT_PROMPTS = None
+MODELS = None
 TOOLS = [
     {"type": "function", "name": "find_paths", "strict": True,
      "description": "Find tracked file paths at the PR head containing a case-insensitive "
@@ -127,18 +131,30 @@ def instructions():
 
 
 def configure_audit_prompts(directory):
-    global AUDIT_PROMPTS
+    global AUDIT_PROMPTS, MODELS
     prompts = {name: load_prompt_file(directory / f"{name}.md")
-               for name in ("common", *AUDIT_NAMES)}
+               for name in ("common", *AUDIT_NAMES, "verifier", "collator")}
     if any(not prompt.strip() for prompt in prompts.values()):
         raise ValueError("audit prompt files must not be empty")
+    models = json.loads((directory / "models.json").read_text(encoding="utf-8"))
+    if (set(models) != set(MODEL_NAMES)
+            or any(not isinstance(model, str) or not model.startswith("gpt-")
+                   for model in models.values())):
+        raise ValueError("model config must name each review stage")
     AUDIT_PROMPTS = prompts
+    MODELS = models
 
 
 def audit_prompts():
     if AUDIT_PROMPTS is None:
         configure_audit_prompts(DEFAULT_AUDIT_DIR)
     return AUDIT_PROMPTS
+
+
+def stage_models():
+    if MODELS is None:
+        configure_audit_prompts(DEFAULT_AUDIT_DIR)
+    return MODELS
 
 
 def default_repository_url(forgejo_api):
@@ -439,9 +455,10 @@ def audit_developer_notes(checkout):
 
 
 def run_audit(api_key, name, prompt, review, notes=""):
+    model = stage_models()[name]
     input_text = review + ("\n\nMerge-base doc/developer-notes.md:\n" + notes
                            if name == "developer_notes" else "")
-    payload = json.dumps({"model": "gpt-6-luna", "store": False,
+    payload = json.dumps({"model": model, "store": False,
                           "reasoning": {"effort": "low"},
                           "instructions": prompt, "input": [
                               {"role": "user", "content": input_text}],
@@ -461,7 +478,7 @@ def run_audit(api_key, name, prompt, review, notes=""):
     usage = result.get("usage") or {}
     details = usage.get("input_tokens_details") or {}
     status = result.get("status")
-    record = {"name": name, "model": "gpt-6-luna", "status": status,
+    record = {"name": name, "model": model, "status": status,
               "incomplete_reason": (result.get("incomplete_details") or {}).get("reason"),
               "request_bytes": len(payload),
               "request_sha256": hashlib.sha256(payload).hexdigest(),
@@ -473,7 +490,8 @@ def run_audit(api_key, name, prompt, review, notes=""):
               "cache_write_tokens": details.get("cache_write_tokens"),
               "output_tokens": usage.get("output_tokens"),
               "reasoning_tokens": (usage.get("output_tokens_details") or {}).get(
-                  "reasoning_tokens")}
+                  "reasoning_tokens"),
+              "output_truncated": len(answer.encode()) > MAX_AUDIT_OUTPUT_BYTES}
     if status != "completed" or not answer.strip():
         if status == "completed":
             record["status"] = "empty"
@@ -486,6 +504,7 @@ def run_audit(api_key, name, prompt, review, notes=""):
 
 def run_audits(api_key, review, checkout, debug):
     prompts = audit_prompts()
+    models = stage_models()
     notes = audit_developer_notes(checkout)
     with ThreadPoolExecutor(max_workers=len(AUDIT_NAMES)) as pool:
         futures = {name: pool.submit(run_audit, api_key, name,
@@ -498,19 +517,20 @@ def run_audits(api_key, review, checkout, debug):
                 answer, record = future.result()
             except Exception as exc:
                 answer = "Audit unavailable."
-                record = {"name": name, "model": "gpt-6-luna", "status": "failed",
+                record = {"name": name, "model": models[name], "status": "failed",
                           "error_type": type(exc).__name__}
                 if isinstance(exc, urllib.error.HTTPError):
                     record["http_status"] = exc.code
             records.append(record)
             results.append(f"{name}:\n{answer}")
     debug["audits"] = records
-    return ("\n\nPreliminary Luna audit leads (unverified; check against the "
-            "checkout before reporting):\n" + "\n\n".join(results))
+    return "Focused Luna reviews:\n" + "\n\n".join(results)
 
 
-def openai_review(api_key, review, checkout, debug=None, current_pr=None):
-    prompt = instructions()
+def openai_review(api_key, review, checkout, debug=None, current_pr=None,
+                  prompt=None, model=None):
+    prompt = instructions() if prompt is None else prompt
+    model = stage_models()["independent"] if model is None else model
     files = tracked_files(checkout)
     inputs = [{"role": "user", "content": review}]
     if debug is not None:
@@ -530,7 +550,7 @@ def openai_review(api_key, review, checkout, debug=None, current_pr=None):
         tool_choice = ("required" if turn == 0 else
                        "none" if calls_used >= MAX_TOOL_CALLS
                        or turn == MAX_MODEL_TURNS - 1 else "auto")
-        payload = json.dumps({"model": "gpt-6-sol", "store": False,
+        payload = json.dumps({"model": model, "store": False,
                               "instructions": prompt, "input": inputs,
                               "tools": TOOLS, "tool_choice": tool_choice,
                               "max_output_tokens": MAX_OUTPUT_TOKENS}).encode()
@@ -657,6 +677,38 @@ def openai_review(api_key, review, checkout, debug=None, current_pr=None):
             raise ValueError("OpenAI response contained no review text")
         return text
     raise ValueError("OpenAI review exceeded model turn limit")
+
+
+def review_with_independent_passes(api_key, review, checkout, current_pr, debug):
+    debug["pipeline_stage"] = "independent"
+    sol_debug = {}
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        audits_future = pool.submit(run_audits, api_key, review, checkout, debug)
+        sol_future = pool.submit(openai_review, api_key, review, checkout,
+                                 sol_debug, current_pr)
+        sol_review = sol_future.result()
+        luna_reviews = audits_future.result()
+    debug.update(sol_debug)
+    debug["independent_review_sha256"] = hashlib.sha256(sol_review.encode()).hexdigest()
+    reviews = f"Independent Sol review:\n{sol_review}\n\n{luna_reviews}"
+
+    debug["pipeline_stage"] = "verification"
+    verification_debug = {}
+    debug["verification"] = verification_debug
+    verified = openai_review(
+        api_key, review + "\n\nIndependent candidate reviews:\n" + reviews,
+        checkout, verification_debug, current_pr,
+        prompt=audit_prompts()["verifier"], model=stage_models()["verifier"])
+    debug["verification_output_sha256"] = hashlib.sha256(verified.encode()).hexdigest()
+
+    debug["pipeline_stage"] = "collation"
+    content, record = run_audit(api_key, "collator", audit_prompts()["collator"],
+                                reviews + "\n\nVerification decisions:\n" + verified)
+    debug["collator"] = record
+    if record["status"] != "completed" or record["output_truncated"]:
+        raise ValueError("Luna collator did not return a complete comment")
+    debug.pop("pipeline_stage")
+    return content
 
 
 def forgejo_request(token, path, method="GET", data=None):
@@ -810,58 +862,79 @@ def current_head(number):
 
 
 def review_metrics(debug):
-    turns = debug.get("turns", [])
+    models = stage_models()
+    independent_turns = debug.get("turns", [])
+    verifier_turns = debug.get("verification", {}).get("turns", [])
+    turns = independent_turns + verifier_turns
+    tools = debug.get("tools", []) + debug.get("verification", {}).get("tools", [])
     audits = debug.get("audits", [])
-    calls = [(turn, (2, 0.2, 2.5, 10)) for turn in turns]
-    calls += [(audit, (0.1, 0.01, 0.125, 0.5)) for audit in audits
+    calls = [(turn, MODEL_RATES.get(models["independent"]))
+             for turn in independent_turns]
+    calls += [(turn, MODEL_RATES.get(models["verifier"]))
+              for turn in verifier_turns]
+    calls += [(audit, MODEL_RATES.get(audit.get("model", models[audit["name"]])))
+              for audit in audits
               if isinstance(audit.get("input_tokens"), int)
               and isinstance(audit.get("output_tokens"), int)]
+    collator = debug.get("collator")
+    if collator and isinstance(collator.get("input_tokens"), int) \
+            and isinstance(collator.get("output_tokens"), int):
+        calls.append((collator, MODEL_RATES.get(
+            collator.get("model", models["collator"]))))
     known_usage = all(isinstance(call.get("input_tokens"), int)
                       and isinstance(call.get("output_tokens"), int)
                       for call, _rates in calls)
-    metrics = {"model_turns": len(turns), "tool_calls": len(debug.get("tools", [])),
+    metrics = {"model_turns": len(turns), "tool_calls": len(tools),
                "audit_calls": len(audits),
                "estimated_cost_usd": None, "total_input_tokens": None,
                "total_output_tokens": None, "total_model_seconds": None}
     if known_usage and calls:
-        cost = 0.0
-        for call, rates in calls:
-            input_tokens = call["input_tokens"]
-            cached = call["cached_tokens"] or 0
-            written = call["cache_write_tokens"] or 0
-            ordinary = max(0, input_tokens - cached - written)
-            multiplier = 2 if input_tokens > 272_000 else 1
-            output_multiplier = 1.5 if multiplier == 2 else 1
-            cost += (ordinary * rates[0] + cached * rates[1]
-                     + written * rates[2]) * multiplier / 1_000_000
-            cost += call["output_tokens"] * rates[3] * output_multiplier / 1_000_000
         metrics.update({
-            "estimated_cost_usd": round(cost, 6),
             "total_input_tokens": sum(call["input_tokens"] for call, _ in calls),
             "total_output_tokens": sum(call["output_tokens"] for call, _ in calls),
             "total_model_seconds": round(sum(call["elapsed_seconds"] for call, _ in calls), 2),
         })
+        if all(rates is not None for _call, rates in calls):
+            cost = 0.0
+            for call, rates in calls:
+                input_tokens = call["input_tokens"]
+                cached = call["cached_tokens"] or 0
+                written = call["cache_write_tokens"] or 0
+                ordinary = max(0, input_tokens - cached - written)
+                multiplier = 2 if input_tokens > 272_000 else 1
+                output_multiplier = 1.5 if multiplier == 2 else 1
+                cost += (ordinary * rates[0] + cached * rates[1]
+                         + written * rates[2]) * multiplier / 1_000_000
+                cost += call["output_tokens"] * rates[3] * output_multiplier / 1_000_000
+            metrics["estimated_cost_usd"] = round(cost, 6)
     return metrics
 
 
 def review_trace(debug):
     prompt = instructions()
     metrics = review_metrics(debug)
-    trace = {"model": "gpt-6-sol", "endpoint": "/v1/responses", "store": False,
+    trace = {"models": stage_models(), "endpoint": "/v1/responses", "store": False,
              "max_output_tokens": MAX_OUTPUT_TOKENS,
              "instructions": debug.get("instructions", prompt),
              "input": "PR text, patch, and commits omitted from public debug output",
              "turns": debug.get("turns", []), "tools": debug.get("tools", []),
-             "audits": debug.get("audits", [])}
+             "audits": debug.get("audits", []),
+             "verification": debug.get("verification", {}),
+             "collator": debug.get("collator")}
     if "review_input_bytes" in debug:
         trace["review_input_bytes"] = debug["review_input_bytes"]
         trace["review_input_sha256"] = debug["review_input_sha256"]
     if debug.get("skip"):
         trace["skip"] = debug["skip"]
+    if debug.get("pipeline_stage"):
+        trace["pipeline_stage"] = debug["pipeline_stage"]
+    for key in ("independent_review_sha256", "verification_output_sha256"):
+        if key in debug:
+            trace[key] = debug[key]
     if metrics["estimated_cost_usd"] is not None:
         trace.update(metrics)
-        trace["pricing_note"] = ("Estimated from token usage at gpt-6-sol and "
-                                 "gpt-6-luna Standard rates. "
+        trace["pricing_note"] = ("Estimated from token usage at configured "
+                                 "gpt-6-sol and gpt-6-luna Standard rates. "
                                  "Only calls with reported usage are counted; "
                                  "missing cache-write counts are treated as zero.")
     else:
@@ -957,12 +1030,9 @@ def worker(jobs, state_dir, api_key, forgejo_token, bot_login):
                 log_review_outcome(number, action, expected_head, "stale", started, debug)
                 continue
             debug = {"skip": skip} if skip else {}
-            if not skip:
-                stage = "audits"
-                review += run_audits(api_key, review, checkout, debug)
             stage = "model"
-            content = f"Skipped: {skip}" if skip else openai_review(
-                api_key, review, checkout, debug, current_pr=number)
+            content = f"Skipped: {skip}" if skip else review_with_independent_passes(
+                api_key, review, checkout, number, debug)
             stage = "publish"
             result = publish_review(forgejo_token, number, bot_login,
                                     base_sha, head_sha, content, debug)
@@ -970,10 +1040,12 @@ def worker(jobs, state_dir, api_key, forgejo_token, bot_login):
         except urllib.error.HTTPError as exc:
             host = urllib.parse.urlsplit(exc.url or "").hostname
             log_review_outcome(number, action, expected_head, "failed", started, debug,
-                               logging.ERROR, stage, type(exc).__name__, exc.code, host)
+                               logging.ERROR, debug.get("pipeline_stage", stage),
+                               type(exc).__name__, exc.code, host)
         except Exception as exc:
             log_review_outcome(number, action, expected_head, "failed", started, debug,
-                               logging.ERROR, stage, type(exc).__name__)
+                               logging.ERROR, debug.get("pipeline_stage", stage),
+                               type(exc).__name__)
         finally:
             jobs.task_done()
 
