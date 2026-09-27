@@ -18,6 +18,14 @@ It can inspect up to 20 lines of merge-base blame and read a related ancestor
 commit's message and file diff, with four history calls per review. Tool output
 is capped.
 
+Before the main Sol review, four focused Luna calls independently check state
+and failure behavior, public contracts and release notes, test evidence, and
+documented developer conventions. The last call receives
+`doc/developer-notes.md` from the PR merge base. Sol receives their short
+candidate findings and verifies them before publishing. Luna calls do not run
+code or read current PR discussion. A failed audit does not prevent Sol review.
+The collapsed comment debug section includes their usage and estimated cost.
+
 The bot writes at most one comment per pull request. New reviews edit the
 existing bot-owned comment when the content changes, and leave it untouched
 when it is already current.
@@ -81,6 +89,8 @@ Useful defaults:
   `<!-- forgejo-review-bot:${repository} -->`
 - `services.forgejoReviewBot.promptFile =
   "${services.forgejoReviewBot.package}/share/forgejo-review-bot/prompt.md"`
+- `services.forgejoReviewBot.auditPromptDir =
+  "${services.forgejoReviewBot.package}/share/forgejo-review-bot/audits"`
 
 Set `repositoryUrl` only when the HTML URL in Forgejo webhook payloads cannot
 be derived from `forgejoApi`.

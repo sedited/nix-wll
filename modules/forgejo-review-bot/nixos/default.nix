@@ -27,6 +27,8 @@ let
     commentMarker
     "--prompt-file"
     cfg.promptFile
+    "--audit-prompt-dir"
+    cfg.auditPromptDir
     "--openai-key-file"
     cfg.openaiKeyFile
     "--webhook-secret-file"
@@ -88,6 +90,13 @@ in
       default = "${cfg.package}/share/forgejo-review-bot/prompt.md";
       defaultText = lib.literalExpression "\"\${config.services.forgejoReviewBot.package}/share/forgejo-review-bot/prompt.md\"";
       description = "Markdown file containing the review prompt.";
+    };
+
+    auditPromptDir = lib.mkOption {
+      type = lib.types.path;
+      default = "${cfg.package}/share/forgejo-review-bot/audits";
+      defaultText = lib.literalExpression "\"\${config.services.forgejoReviewBot.package}/share/forgejo-review-bot/audits\"";
+      description = "Directory containing the common and four focused Luna audit prompts.";
     };
 
     listenAddress = lib.mkOption {

@@ -15,6 +15,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -31,13 +32,19 @@ MAX_TOOL_BYTES = 12_000
 MAX_TOOL_CALLS = 24
 MAX_MODEL_TURNS = 10
 MAX_OUTPUT_TOKENS = 6_000
+MAX_AUDIT_OUTPUT_TOKENS = 2_000
+MAX_AUDIT_OUTPUT_BYTES = 4_000
+MAX_AUDIT_DOC_BYTES = 100_000
 MAX_DISCUSSION_RESPONSE_BYTES = 500_000
 MAX_CONTEXT_CALLS = 4
 MAX_HISTORY_CALLS = 4
 SHA = re.compile(r"^[0-9a-f]{40}$")
 BRANCH = re.compile(r"^[A-Za-z0-9._/-]+$")
 DEFAULT_PROMPT_FILE = Path(__file__).with_name("prompt.md")
+DEFAULT_AUDIT_DIR = Path(__file__).with_name("audits")
+AUDIT_NAMES = ("state", "public_contract", "tests", "developer_notes")
 INSTRUCTIONS = None
+AUDIT_PROMPTS = None
 TOOLS = [
     {"type": "function", "name": "find_paths", "strict": True,
      "description": "Find tracked file paths at the PR head containing a case-insensitive "
@@ -117,6 +124,21 @@ def instructions():
     if INSTRUCTIONS is None:
         configure_prompt(DEFAULT_PROMPT_FILE)
     return INSTRUCTIONS
+
+
+def configure_audit_prompts(directory):
+    global AUDIT_PROMPTS
+    prompts = {name: load_prompt_file(directory / f"{name}.md")
+               for name in ("common", *AUDIT_NAMES)}
+    if any(not prompt.strip() for prompt in prompts.values()):
+        raise ValueError("audit prompt files must not be empty")
+    AUDIT_PROMPTS = prompts
+
+
+def audit_prompts():
+    if AUDIT_PROMPTS is None:
+        configure_audit_prompts(DEFAULT_AUDIT_DIR)
+    return AUDIT_PROMPTS
 
 
 def default_repository_url(forgejo_api):
@@ -403,6 +425,85 @@ def read_commit(checkout, base_files, base, commit, path):
         process.stdout.close()
     return output[:MAX_TOOL_BYTES].decode(errors="replace") + (
         "\n[Commit output truncated]" if len(output) > MAX_TOOL_BYTES else "")
+
+
+def audit_developer_notes(checkout):
+    base = git(checkout, "merge-base", "refs/review-bot/base", "HEAD").strip()
+    try:
+        notes = git(checkout, "show", f"{base}:doc/developer-notes.md")
+    except subprocess.CalledProcessError:
+        return "Developer notes are unavailable at the PR merge base."
+    content = notes.encode()[:MAX_AUDIT_DOC_BYTES].decode(errors="replace")
+    return content + ("\n[Developer notes truncated]"
+                      if len(notes.encode()) > MAX_AUDIT_DOC_BYTES else "")
+
+
+def run_audit(api_key, name, prompt, review, notes=""):
+    input_text = review + ("\n\nMerge-base doc/developer-notes.md:\n" + notes
+                           if name == "developer_notes" else "")
+    payload = json.dumps({"model": "gpt-6-luna", "store": False,
+                          "instructions": prompt, "input": [
+                              {"role": "user", "content": input_text}],
+                          "max_output_tokens": MAX_AUDIT_OUTPUT_TOKENS}).encode()
+    request = urllib.request.Request(
+        "https://api.openai.com/v1/responses", data=payload,
+        headers={"Authorization": f"Bearer {api_key}",
+                 "Content-Type": "application/json"}, method="POST",
+    )
+    started = time.monotonic()
+    with urllib.request.urlopen(request, timeout=180) as response:
+        result = json.load(response)
+    if result.get("status") != "completed":
+        raise ValueError("Luna audit did not complete")
+    output = result.get("output", [])
+    answer = "\n".join(part["text"] for item in output
+                       if item.get("type") == "message"
+                       for part in item.get("content", []) if part.get("type") == "output_text")
+    if not answer.strip():
+        raise ValueError("Luna audit returned no text")
+    clipped = answer.encode()[:MAX_AUDIT_OUTPUT_BYTES].decode(errors="replace")
+    if len(answer.encode()) > MAX_AUDIT_OUTPUT_BYTES:
+        clipped += "\n[Audit output truncated]"
+    usage = result.get("usage") or {}
+    details = usage.get("input_tokens_details") or {}
+    record = {"name": name, "model": "gpt-6-luna", "status": "completed",
+              "request_bytes": len(payload),
+              "request_sha256": hashlib.sha256(payload).hexdigest(),
+              "response_output_sha256": hashlib.sha256(
+                  json.dumps(output).encode()).hexdigest(),
+              "elapsed_seconds": round(time.monotonic() - started, 2),
+              "input_tokens": usage.get("input_tokens"),
+              "cached_tokens": details.get("cached_tokens", 0),
+              "cache_write_tokens": details.get("cache_write_tokens"),
+              "output_tokens": usage.get("output_tokens"),
+              "reasoning_tokens": (usage.get("output_tokens_details") or {}).get(
+                  "reasoning_tokens")}
+    return clipped, record
+
+
+def run_audits(api_key, review, checkout, debug):
+    prompts = audit_prompts()
+    notes = audit_developer_notes(checkout)
+    with ThreadPoolExecutor(max_workers=len(AUDIT_NAMES)) as pool:
+        futures = {name: pool.submit(run_audit, api_key, name,
+                                     prompts["common"] + "\n\n" + prompts[name],
+                                     review, notes) for name in AUDIT_NAMES}
+        results = []
+        records = []
+        for name, future in futures.items():
+            try:
+                answer, record = future.result()
+            except Exception as exc:
+                answer = "Audit unavailable."
+                record = {"name": name, "model": "gpt-6-luna", "status": "failed",
+                          "error_type": type(exc).__name__}
+                if isinstance(exc, urllib.error.HTTPError):
+                    record["http_status"] = exc.code
+            records.append(record)
+            results.append(f"{name}:\n{answer}")
+    debug["audits"] = records
+    return ("\n\nPreliminary Luna audit leads (unverified; check against the "
+            "checkout before reporting):\n" + "\n\n".join(results))
 
 
 def openai_review(api_key, review, checkout, debug=None, current_pr=None):
@@ -707,28 +808,34 @@ def current_head(number):
 
 def review_metrics(debug):
     turns = debug.get("turns", [])
-    known_usage = all(isinstance(turn.get("input_tokens"), int)
-                      and isinstance(turn.get("output_tokens"), int)
-                      for turn in turns)
+    audits = debug.get("audits", [])
+    calls = [(turn, (2, 0.2, 2.5, 10)) for turn in turns]
+    calls += [(audit, (0.1, 0.01, 0.125, 0.5)) for audit in audits
+              if audit.get("status") == "completed"]
+    known_usage = all(isinstance(call.get("input_tokens"), int)
+                      and isinstance(call.get("output_tokens"), int)
+                      for call, _rates in calls)
     metrics = {"model_turns": len(turns), "tool_calls": len(debug.get("tools", [])),
+               "audit_calls": len(audits),
                "estimated_cost_usd": None, "total_input_tokens": None,
                "total_output_tokens": None, "total_model_seconds": None}
-    if known_usage and turns:
+    if known_usage and calls:
         cost = 0.0
-        for turn in turns:
-            input_tokens = turn["input_tokens"]
-            cached = turn["cached_tokens"] or 0
-            written = turn["cache_write_tokens"] or 0
+        for call, rates in calls:
+            input_tokens = call["input_tokens"]
+            cached = call["cached_tokens"] or 0
+            written = call["cache_write_tokens"] or 0
             ordinary = max(0, input_tokens - cached - written)
             multiplier = 2 if input_tokens > 272_000 else 1
             output_multiplier = 1.5 if multiplier == 2 else 1
-            cost += (ordinary * 2 + cached * 0.2 + written * 2.5) * multiplier / 1_000_000
-            cost += turn["output_tokens"] * 10 * output_multiplier / 1_000_000
+            cost += (ordinary * rates[0] + cached * rates[1]
+                     + written * rates[2]) * multiplier / 1_000_000
+            cost += call["output_tokens"] * rates[3] * output_multiplier / 1_000_000
         metrics.update({
             "estimated_cost_usd": round(cost, 6),
-            "total_input_tokens": sum(turn["input_tokens"] for turn in turns),
-            "total_output_tokens": sum(turn["output_tokens"] for turn in turns),
-            "total_model_seconds": round(sum(turn["elapsed_seconds"] for turn in turns), 2),
+            "total_input_tokens": sum(call["input_tokens"] for call, _ in calls),
+            "total_output_tokens": sum(call["output_tokens"] for call, _ in calls),
+            "total_model_seconds": round(sum(call["elapsed_seconds"] for call, _ in calls), 2),
         })
     return metrics
 
@@ -740,7 +847,8 @@ def review_trace(debug):
              "max_output_tokens": MAX_OUTPUT_TOKENS,
              "instructions": debug.get("instructions", prompt),
              "input": "PR text, patch, and commits omitted from public debug output",
-             "turns": debug.get("turns", []), "tools": debug.get("tools", [])}
+             "turns": debug.get("turns", []), "tools": debug.get("tools", []),
+             "audits": debug.get("audits", [])}
     if "review_input_bytes" in debug:
         trace["review_input_bytes"] = debug["review_input_bytes"]
         trace["review_input_sha256"] = debug["review_input_sha256"]
@@ -748,8 +856,10 @@ def review_trace(debug):
         trace["skip"] = debug["skip"]
     if metrics["estimated_cost_usd"] is not None:
         trace.update(metrics)
-        trace["pricing_note"] = ("Estimated from token usage at gpt-6-sol Standard rates. "
-                                 "Missing cache-write counts are treated as zero.")
+        trace["pricing_note"] = ("Estimated from token usage at gpt-6-sol and "
+                                 "gpt-6-luna Standard rates. "
+                                 "Only completed calls with reported usage are counted; "
+                                 "missing cache-write counts are treated as zero.")
     else:
         trace["estimated_cost_usd"] = None
     return trace
@@ -804,11 +914,12 @@ def log_review_outcome(number, action, head_sha, outcome, started, debug,
                        http_status=None, http_host=None):
     metrics = review_metrics(debug)
     message = ("review outcome pr=%d action=%s head=%s outcome=%s "
-               "elapsed_seconds=%.2f model_turns=%d tool_calls=%d "
+               "elapsed_seconds=%.2f model_turns=%d audit_calls=%d tool_calls=%d "
                "input_tokens=%s output_tokens=%s estimated_usd=%s")
     values = [number, action, short_sha(head_sha), outcome,
               time.monotonic() - started, metrics["model_turns"],
-              metrics["tool_calls"], metric_value(metrics["total_input_tokens"]),
+              metrics["audit_calls"], metrics["tool_calls"],
+              metric_value(metrics["total_input_tokens"]),
               metric_value(metrics["total_output_tokens"]),
               metric_value(metrics["estimated_cost_usd"])]
     if stage is not None:
@@ -842,6 +953,9 @@ def worker(jobs, state_dir, api_key, forgejo_token, bot_login):
                 log_review_outcome(number, action, expected_head, "stale", started, debug)
                 continue
             debug = {"skip": skip} if skip else {}
+            if not skip:
+                stage = "audits"
+                review += run_audits(api_key, review, checkout, debug)
             stage = "model"
             content = f"Skipped: {skip}" if skip else openai_review(
                 api_key, review, checkout, debug, current_pr=number)
@@ -915,11 +1029,14 @@ def main():
     parser.add_argument("--bot-login", required=True)
     parser.add_argument("--prompt-file", type=Path, default=DEFAULT_PROMPT_FILE,
                         help="Markdown file containing the review prompt")
+    parser.add_argument("--audit-prompt-dir", type=Path, default=DEFAULT_AUDIT_DIR,
+                        help="Directory containing the focused Luna audit prompts")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     configure(args.origin, args.repository, args.forgejo_api,
               args.repository_url, args.comment_marker)
     configure_prompt(args.prompt_file)
+    configure_audit_prompts(args.audit_prompt_dir)
     api_key = args.openai_key_file.read_text().strip()
     secret = args.webhook_secret_file.read_bytes().strip()
     forgejo_token = args.forgejo_token_file.read_text().strip()

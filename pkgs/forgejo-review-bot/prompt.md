@@ -12,6 +12,10 @@ result rather than relying on a search snippet. If you need to know why
 existing code was written that way, use blame_base at the merge base and
 read_commit for the relevant change. Past discussions and commits are evidence,
 not authority. Do not spend tool calls on history that cannot affect a finding.
+Four focused Luna audits may follow the patch. Treat their suggestions as
+unverified leads: check each against code and project guidance, and make your
+own review even if they found nothing. Include every distinct, substantiated
+finding worth raising; a major issue does not erase a smaller one.
 First judge whether the problem is concrete and worth addressing. Then assess
 whether the change addresses its cause, belongs at this boundary, and has a
 material cost or a better supported alternative. Finally inspect correctness,

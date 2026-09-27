@@ -386,6 +386,67 @@ class BotTests(unittest.TestCase):
         self.assertEqual(sent["instructions"], "Custom review prompt")
         self.assertEqual(debug["instructions"], "Custom review prompt")
 
+    def test_audit_request_uses_luna_and_returns_bounded_lead(self):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+            def read(self, *args):
+                return json.dumps({"status": "completed", "output": [{"type": "message",
+                    "content": [{"type": "output_text", "text": "Candidate: missing note"}]}],
+                    "usage": {"input_tokens": 100, "output_tokens": 20}}).encode()
+
+        with patch.object(bot.urllib.request, "urlopen", return_value=Response()) as send:
+            answer, record = bot.run_audit("key", "public_contract", "Check policy",
+                                           "PR patch")
+        payload = json.loads(send.call_args.args[0].data)
+        self.assertEqual(payload["model"], "gpt-6-luna")
+        self.assertIs(payload["store"], False)
+        self.assertEqual(payload["instructions"], "Check policy")
+        self.assertEqual(payload["max_output_tokens"], bot.MAX_AUDIT_OUTPUT_TOKENS)
+        self.assertEqual(answer, "Candidate: missing note")
+        self.assertEqual(record["name"], "public_contract")
+        self.assertEqual(record["input_tokens"], 100)
+
+    def test_four_audits_use_merge_base_notes_and_keep_failures_separate(self):
+        prompts = {name: f"Prompt for {name}" for name in ("common", *bot.AUDIT_NAMES)}
+        called = []
+
+        def audit(api_key, name, prompt, review, notes):
+            called.append((name, prompt, review, notes))
+            if name == "tests":
+                raise urllib.error.HTTPError("https://api.openai.com", 429,
+                                             "rate limited", {}, None)
+            return f"Finding from {name}", {"name": name, "model": "gpt-6-luna",
+                                             "status": "completed", "input_tokens": 100,
+                                             "cached_tokens": 0, "cache_write_tokens": 0,
+                                             "output_tokens": 20, "elapsed_seconds": 1.0}
+
+        debug = {}
+        with patch.object(bot, "audit_prompts", return_value=prompts), \
+                patch.object(bot, "audit_developer_notes", return_value="base notes"), \
+                patch.object(bot, "run_audit", side_effect=audit):
+            leads = bot.run_audits("key", "PR patch", Path("/unused"), debug)
+        self.assertEqual({item[0] for item in called}, set(bot.AUDIT_NAMES))
+        self.assertTrue(all(item[2] == "PR patch" and item[3] == "base notes"
+                            for item in called))
+        self.assertEqual([item["name"] for item in debug["audits"]],
+                         list(bot.AUDIT_NAMES))
+        self.assertEqual(debug["audits"][2]["http_status"], 429)
+        self.assertIn("state:\nFinding from state", leads)
+        self.assertIn("tests:\nAudit unavailable.", leads)
+
+    def test_developer_notes_are_read_at_merge_base(self):
+        base = "b" * 40
+        with patch.object(bot, "git", side_effect=[base + "\n", "Base-only rules\n"]) as git:
+            self.assertEqual(bot.audit_developer_notes(Path("/unused")),
+                             "Base-only rules\n")
+        self.assertEqual(git.call_args.args[1:],
+                         ("show", f"{base}:doc/developer-notes.md"))
+
     def test_model_reads_context_then_finishes_with_stateless_history(self):
         call = {"type": "function_call", "id": "fc_1", "call_id": "call_1",
                 "name": "read_file", "arguments": '{"path":"src/main.cpp","start_line":1}'}
@@ -457,6 +518,21 @@ class BotTests(unittest.TestCase):
         self.assertNotIn("<script>", body)
         self.assertEqual(body.count("</details>"), 1)
 
+    def test_review_cost_includes_luna_audits(self):
+        debug = {"turns": [{"input_tokens": 100, "cached_tokens": 20,
+                            "cache_write_tokens": 10, "output_tokens": 5,
+                            "elapsed_seconds": 1.25}],
+                 "audits": [{"name": "state", "status": "completed",
+                             "input_tokens": 1000, "cached_tokens": 100,
+                             "cache_write_tokens": 0, "output_tokens": 200,
+                             "elapsed_seconds": 2.0},
+                            {"name": "tests", "status": "failed"}]}
+        metrics = bot.review_metrics(debug)
+        self.assertEqual(metrics["audit_calls"], 2)
+        self.assertEqual(metrics["estimated_cost_usd"], 0.000410)
+        self.assertEqual(metrics["total_input_tokens"], 1100)
+        self.assertEqual(metrics["total_output_tokens"], 205)
+
     def test_review_body_starts_with_commit_ids(self):
         base = "b" * 40
         head = "a" * 40
@@ -526,6 +602,7 @@ class BotTests(unittest.TestCase):
                 patch.object(bot, "pull_request_context", return_value=("Title", "Body")), \
                 patch.object(bot, "collect_review",
                              return_value=("b" * 40, "a" * 40, "review input", None)), \
+                patch.object(bot, "run_audits", return_value="\nAudit leads"), \
                 patch.object(bot, "openai_review", return_value="New review.") as model, \
                 patch.object(bot, "publish_review", return_value="updated") as publish:
             with self.assertRaises(StopIteration):
@@ -533,6 +610,7 @@ class BotTests(unittest.TestCase):
                            Path("/unused"), "openai-key", "forgejo-token", "review-bot")
         find.assert_not_called()
         model.assert_called_once()
+        self.assertIn("Audit leads", model.call_args.args[1])
         publish.assert_called_once()
 
     def test_publish_creates_then_edits_one_bot_comment(self):
@@ -658,6 +736,7 @@ class BotTests(unittest.TestCase):
                 patch.object(bot, "pull_request_context", return_value=("Title", "Body")), \
                 patch.object(bot, "collect_review",
                              return_value=("b" * 40, "a" * 40, "review input", None)), \
+                patch.object(bot, "run_audits", return_value="\nAudit leads"), \
                 patch.object(bot, "openai_review", side_effect=review), \
                 patch.object(bot, "publish_review", return_value="created"):
             with self.assertLogs(level="INFO") as logs, self.assertRaises(StopIteration):
