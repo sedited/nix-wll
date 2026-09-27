@@ -32,7 +32,7 @@ MAX_TOOL_BYTES = 12_000
 MAX_TOOL_CALLS = 24
 MAX_MODEL_TURNS = 10
 MAX_OUTPUT_TOKENS = 6_000
-MAX_AUDIT_OUTPUT_TOKENS = 2_000
+MAX_AUDIT_OUTPUT_TOKENS = 4_000
 MAX_AUDIT_OUTPUT_BYTES = 4_000
 MAX_AUDIT_DOC_BYTES = 100_000
 MAX_DISCUSSION_RESPONSE_BYTES = 500_000
@@ -442,6 +442,7 @@ def run_audit(api_key, name, prompt, review, notes=""):
     input_text = review + ("\n\nMerge-base doc/developer-notes.md:\n" + notes
                            if name == "developer_notes" else "")
     payload = json.dumps({"model": "gpt-6-luna", "store": False,
+                          "reasoning": {"effort": "low"},
                           "instructions": prompt, "input": [
                               {"role": "user", "content": input_text}],
                           "max_output_tokens": MAX_AUDIT_OUTPUT_TOKENS}).encode()
@@ -453,20 +454,15 @@ def run_audit(api_key, name, prompt, review, notes=""):
     started = time.monotonic()
     with urllib.request.urlopen(request, timeout=180) as response:
         result = json.load(response)
-    if result.get("status") != "completed":
-        raise ValueError("Luna audit did not complete")
     output = result.get("output", [])
     answer = "\n".join(part["text"] for item in output
                        if item.get("type") == "message"
                        for part in item.get("content", []) if part.get("type") == "output_text")
-    if not answer.strip():
-        raise ValueError("Luna audit returned no text")
-    clipped = answer.encode()[:MAX_AUDIT_OUTPUT_BYTES].decode(errors="replace")
-    if len(answer.encode()) > MAX_AUDIT_OUTPUT_BYTES:
-        clipped += "\n[Audit output truncated]"
     usage = result.get("usage") or {}
     details = usage.get("input_tokens_details") or {}
-    record = {"name": name, "model": "gpt-6-luna", "status": "completed",
+    status = result.get("status")
+    record = {"name": name, "model": "gpt-6-luna", "status": status,
+              "incomplete_reason": (result.get("incomplete_details") or {}).get("reason"),
               "request_bytes": len(payload),
               "request_sha256": hashlib.sha256(payload).hexdigest(),
               "response_output_sha256": hashlib.sha256(
@@ -478,6 +474,13 @@ def run_audit(api_key, name, prompt, review, notes=""):
               "output_tokens": usage.get("output_tokens"),
               "reasoning_tokens": (usage.get("output_tokens_details") or {}).get(
                   "reasoning_tokens")}
+    if status != "completed" or not answer.strip():
+        if status == "completed":
+            record["status"] = "empty"
+        return "Audit unavailable.", record
+    clipped = answer.encode()[:MAX_AUDIT_OUTPUT_BYTES].decode(errors="replace")
+    if len(answer.encode()) > MAX_AUDIT_OUTPUT_BYTES:
+        clipped += "\n[Audit output truncated]"
     return clipped, record
 
 
@@ -811,7 +814,8 @@ def review_metrics(debug):
     audits = debug.get("audits", [])
     calls = [(turn, (2, 0.2, 2.5, 10)) for turn in turns]
     calls += [(audit, (0.1, 0.01, 0.125, 0.5)) for audit in audits
-              if audit.get("status") == "completed"]
+              if isinstance(audit.get("input_tokens"), int)
+              and isinstance(audit.get("output_tokens"), int)]
     known_usage = all(isinstance(call.get("input_tokens"), int)
                       and isinstance(call.get("output_tokens"), int)
                       for call, _rates in calls)
@@ -858,7 +862,7 @@ def review_trace(debug):
         trace.update(metrics)
         trace["pricing_note"] = ("Estimated from token usage at gpt-6-sol and "
                                  "gpt-6-luna Standard rates. "
-                                 "Only completed calls with reported usage are counted; "
+                                 "Only calls with reported usage are counted; "
                                  "missing cache-write counts are treated as zero.")
     else:
         trace["estimated_cost_usd"] = None

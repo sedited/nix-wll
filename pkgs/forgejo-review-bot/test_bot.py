@@ -404,12 +404,33 @@ class BotTests(unittest.TestCase):
                                            "PR patch")
         payload = json.loads(send.call_args.args[0].data)
         self.assertEqual(payload["model"], "gpt-6-luna")
+        self.assertEqual(payload["reasoning"], {"effort": "low"})
         self.assertIs(payload["store"], False)
         self.assertEqual(payload["instructions"], "Check policy")
         self.assertEqual(payload["max_output_tokens"], bot.MAX_AUDIT_OUTPUT_TOKENS)
         self.assertEqual(answer, "Candidate: missing note")
         self.assertEqual(record["name"], "public_contract")
         self.assertEqual(record["input_tokens"], 100)
+
+    def test_incomplete_audit_records_reason_and_usage(self):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+            def read(self, *args):
+                return json.dumps({"status": "incomplete", "output": [],
+                    "incomplete_details": {"reason": "max_output_tokens"},
+                    "usage": {"input_tokens": 1000, "output_tokens": 4000}}).encode()
+
+        with patch.object(bot.urllib.request, "urlopen", return_value=Response()):
+            answer, record = bot.run_audit("key", "state", "Check state", "PR patch")
+        self.assertEqual(answer, "Audit unavailable.")
+        self.assertEqual(record["status"], "incomplete")
+        self.assertEqual(record["incomplete_reason"], "max_output_tokens")
+        self.assertEqual(record["output_tokens"], 4000)
 
     def test_four_audits_use_merge_base_notes_and_keep_failures_separate(self):
         prompts = {name: f"Prompt for {name}" for name in ("common", *bot.AUDIT_NAMES)}
@@ -526,12 +547,15 @@ class BotTests(unittest.TestCase):
                              "input_tokens": 1000, "cached_tokens": 100,
                              "cache_write_tokens": 0, "output_tokens": 200,
                              "elapsed_seconds": 2.0},
-                            {"name": "tests", "status": "failed"}]}
+                            {"name": "tests", "status": "incomplete",
+                             "input_tokens": 500, "cached_tokens": 0,
+                             "cache_write_tokens": 0, "output_tokens": 4000,
+                             "elapsed_seconds": 1.0}]}
         metrics = bot.review_metrics(debug)
         self.assertEqual(metrics["audit_calls"], 2)
-        self.assertEqual(metrics["estimated_cost_usd"], 0.000410)
-        self.assertEqual(metrics["total_input_tokens"], 1100)
-        self.assertEqual(metrics["total_output_tokens"], 205)
+        self.assertEqual(metrics["estimated_cost_usd"], 0.002460)
+        self.assertEqual(metrics["total_input_tokens"], 1600)
+        self.assertEqual(metrics["total_output_tokens"], 4205)
 
     def test_review_body_starts_with_commit_ids(self):
         base = "b" * 40
