@@ -264,7 +264,6 @@ in
           GLOBAL_TWO_FACTOR_REQUIREMENT = "admin";
           LOGIN_REMEMBER_DAYS = 7;
           DISABLE_QUERY_AUTH_TOKEN = true;
-          DISABLE_WEBHOOKS = true;
         };
 
         repository = {
