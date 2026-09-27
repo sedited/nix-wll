@@ -27,6 +27,19 @@ def payload(action="opened", head="a" * 40):
                              "base": {"ref": "master"}}}
 
 
+class JobSource:
+    def __init__(self, *jobs):
+        self.jobs = list(jobs)
+
+    def get(self):
+        if self.jobs:
+            return self.jobs.pop(0)
+        raise StopIteration
+
+    def task_done(self):
+        pass
+
+
 class BotTests(unittest.TestCase):
     def setUp(self):
         bot.configure(
@@ -56,9 +69,10 @@ class BotTests(unittest.TestCase):
         self.assertFalse(bot.valid_signature(body, "bad", b"secret"))
 
     def test_event_filters_and_rejects_other_repository(self):
-        self.assertEqual(bot.parse_event("pull_request", payload()), (42, "master", "a" * 40))
+        self.assertEqual(bot.parse_event("pull_request", payload()),
+                         (42, "master", "a" * 40, "opened"))
         self.assertEqual(bot.parse_event("pull_request", payload("synchronize")),
-                         (42, "master", "a" * 40))
+                         (42, "master", "a" * 40, "synchronize"))
         self.assertIsNone(bot.parse_event("push", payload()))
         self.assertIsNone(bot.parse_event("pull_request", payload("closed")))
         wrong = payload()
@@ -77,13 +91,35 @@ class BotTests(unittest.TestCase):
             url = f"http://127.0.0.1:{server.server_port}/webhooks/forgejo"
             request = urllib.request.Request(url, body, headers={
                 "X-Forgejo-Signature": sig, "X-Forgejo-Event": "pull_request"})
-            self.assertEqual(urllib.request.urlopen(request).status, 202)
-            self.assertEqual(jobs.get_nowait(), (42, "master", "a" * 40))
+            with self.assertLogs(level="INFO") as logs:
+                self.assertEqual(urllib.request.urlopen(request).status, 202)
+            self.assertEqual(jobs.get_nowait(), (42, "master", "a" * 40, "opened"))
+            self.assertIn("review enqueue pr=42 action=opened head=aaaaaaaaaaaa",
+                          "\n".join(logs.output))
             request.headers["X-Forgejo-Signature"] = "bad"
             with self.assertRaises(urllib.error.HTTPError) as error:
                 urllib.request.urlopen(request)
             self.assertEqual(error.exception.code, 401)
             self.assertTrue(jobs.empty())
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
+    def test_browser_gets_do_not_log_info(self):
+        jobs = Queue()
+        server = ThreadingHTTPServer(("127.0.0.1", 0), bot.make_handler(b"secret", jobs))
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        try:
+            url = f"http://127.0.0.1:{server.server_port}/"
+            with patch.object(bot.logging, "info") as info, \
+                    patch.object(bot.logging, "debug") as debug:
+                with self.assertRaises(urllib.error.HTTPError) as error:
+                    urllib.request.urlopen(url)
+            self.assertEqual(error.exception.code, 501)
+            info.assert_not_called()
+            self.assertTrue(debug.called)
         finally:
             server.shutdown()
             server.server_close()
@@ -217,6 +253,12 @@ class BotTests(unittest.TestCase):
                  "tools": [{"name": "search_code", "arguments": "</details> ```",
                             "output_bytes": 19, "output_sha256": "a" * 64}]}
         body = bot.review_body("b" * 40, "a" * 40, "Review text.", debug)
+        metrics = bot.review_metrics(debug)
+        trace = bot.review_trace(debug)
+        self.assertEqual(metrics["estimated_cost_usd"], 0.000219)
+        self.assertEqual(metrics["total_input_tokens"], 100)
+        self.assertEqual(metrics["total_output_tokens"], 5)
+        self.assertEqual(trace["estimated_cost_usd"], metrics["estimated_cost_usd"])
         self.assertIn("estimated_cost_usd", body)
         self.assertIn("0.000219", body)
         self.assertIn("total_model_seconds", body)
@@ -342,28 +384,88 @@ class BotTests(unittest.TestCase):
                          ["git", "ls-remote", bot.ORIGIN, "refs/pull/42/head"])
 
     def test_repeated_head_skips_model_call(self):
-        class OneJob:
-            def __init__(self):
-                self.calls = 0
-
-            def get(self):
-                self.calls += 1
-                if self.calls == 1:
-                    return 42, "master", "a" * 40
-                raise StopIteration
-
-            def task_done(self):
-                pass
-
         existing = {"body": bot.review_body("b" * 40, "a" * 40, "Reviewed.")}
         with patch.object(bot, "find_comment", return_value=existing), \
                 patch.object(bot, "collect_review") as collect, \
                 patch.object(bot, "openai_review") as model:
-            with self.assertRaises(StopIteration):
-                bot.worker(OneJob(), Path("/unused"), "openai-key", "forgejo-token",
-                           "review-bot")
+            with self.assertLogs(level="INFO") as logs, self.assertRaises(StopIteration):
+                bot.worker(JobSource((42, "master", "a" * 40, "opened")),
+                           Path("/unused"), "openai-key", "forgejo-token", "review-bot")
         collect.assert_not_called()
         model.assert_not_called()
+        self.assertIn("outcome=already-reviewed", "\n".join(logs.output))
+
+    def test_worker_logs_created_outcome_with_model_metrics(self):
+        def review(api_key, review_input, checkout, debug):
+            debug.update({"turns": [{"input_tokens": 100, "cached_tokens": 20,
+                                     "cache_write_tokens": 10, "output_tokens": 5,
+                                     "elapsed_seconds": 1.25}],
+                          "tools": [{"name": "read_file"}, {"name": "search_code"}]})
+            return "Review text."
+
+        with patch.object(bot, "find_comment", return_value=None), \
+                patch.object(bot, "pull_request_context", return_value=("Title", "Body")), \
+                patch.object(bot, "collect_review",
+                             return_value=("b" * 40, "a" * 40, "review input", None)), \
+                patch.object(bot, "openai_review", side_effect=review), \
+                patch.object(bot, "publish_review", return_value="created"):
+            with self.assertLogs(level="INFO") as logs, self.assertRaises(StopIteration):
+                bot.worker(JobSource((42, "master", "a" * 40, "synchronize")),
+                           Path("/unused"), "openai-key", "forgejo-token", "review-bot")
+        output = "\n".join(logs.output)
+        self.assertIn("review start pr=42 action=synchronize head=aaaaaaaaaaaa", output)
+        self.assertIn("outcome=created", output)
+        self.assertIn("model_turns=1", output)
+        self.assertIn("tool_calls=2", output)
+        self.assertIn("input_tokens=100", output)
+        self.assertIn("output_tokens=5", output)
+        self.assertIn("estimated_usd=0.000219", output)
+
+    def test_worker_logs_stale_outcome_before_model_call(self):
+        with patch.object(bot, "find_comment", return_value=None), \
+                patch.object(bot, "pull_request_context", return_value=("Title", "Body")), \
+                patch.object(bot, "collect_review",
+                             return_value=("b" * 40, "c" * 40, None, "changed")), \
+                patch.object(bot, "openai_review") as model, \
+                patch.object(bot, "publish_review") as publish:
+            with self.assertLogs(level="INFO") as logs, self.assertRaises(StopIteration):
+                bot.worker(JobSource((42, "master", "a" * 40, "synchronize")),
+                           Path("/unused"), "openai-key", "forgejo-token", "review-bot")
+        model.assert_not_called()
+        publish.assert_not_called()
+        output = "\n".join(logs.output)
+        self.assertIn("outcome=stale", output)
+        self.assertIn("model_turns=0", output)
+        self.assertIn("estimated_usd=unknown", output)
+
+    def test_worker_logs_failed_stage_and_http_status(self):
+        error = urllib.error.HTTPError("https://git.fish.foo/api", 503, "down", {}, None)
+        with patch.object(bot, "find_comment", side_effect=error):
+            with self.assertLogs(level="ERROR") as logs, self.assertRaises(StopIteration):
+                bot.worker(JobSource((42, "master", "a" * 40, "opened")),
+                           Path("/unused"), "openai-key", "forgejo-token", "review-bot")
+        output = "\n".join(logs.output)
+        self.assertIn("outcome=failed", output)
+        self.assertIn("stage=precheck", output)
+        self.assertIn("error_type=HTTPError", output)
+        self.assertIn("http_status=503", output)
+        self.assertIn("http_host=git.fish.foo", output)
+
+    def test_worker_logs_unexpected_exception_and_keeps_running(self):
+        existing = {"body": bot.review_body("c" * 40, "b" * 40, "Reviewed.")}
+        with patch.object(bot, "find_comment",
+                          side_effect=[RuntimeError("token-secret"), existing]):
+            with self.assertLogs(level="INFO") as logs, self.assertRaises(StopIteration):
+                bot.worker(JobSource((42, "master", "a" * 40, "opened"),
+                                     (43, "master", "b" * 40, "synchronize")),
+                           Path("/unused"), "openai-key", "forgejo-token", "review-bot")
+        output = "\n".join(logs.output)
+        self.assertIn("pr=42", output)
+        self.assertIn("outcome=failed", output)
+        self.assertIn("error_type=RuntimeError", output)
+        self.assertIn("pr=43", output)
+        self.assertIn("outcome=already-reviewed", output)
+        self.assertNotIn("token-secret", output)
 
 
 if __name__ == "__main__":

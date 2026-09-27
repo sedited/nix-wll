@@ -158,7 +158,7 @@ def parse_event(event, payload):
             or base_ref.endswith("/") or base_ref.endswith(".lock")
             or not isinstance(head_sha, str) or not SHA.fullmatch(head_sha)):
         raise ValueError("invalid or unexpected pull request payload")
-    return number, base_ref, head_sha
+    return number, base_ref, head_sha, payload["action"]
 
 
 def git(checkout, *args):
@@ -415,21 +415,14 @@ def current_head(number):
     return fields[0]
 
 
-def debug_section(debug):
+def review_metrics(debug):
     turns = debug.get("turns", [])
     known_usage = all(isinstance(turn.get("input_tokens"), int)
                       and isinstance(turn.get("output_tokens"), int)
                       for turn in turns)
-    trace = {"model": "gpt-6-sol", "endpoint": "/v1/responses", "store": False,
-             "max_output_tokens": 3000,
-             "instructions": debug.get("instructions", INSTRUCTIONS),
-             "input": "PR text, patch, and commits omitted from public debug output",
-             "turns": turns, "tools": debug.get("tools", [])}
-    if "review_input_bytes" in debug:
-        trace["review_input_bytes"] = debug["review_input_bytes"]
-        trace["review_input_sha256"] = debug["review_input_sha256"]
-    if debug.get("skip"):
-        trace["skip"] = debug["skip"]
+    metrics = {"model_turns": len(turns), "tool_calls": len(debug.get("tools", [])),
+               "estimated_cost_usd": None, "total_input_tokens": None,
+               "total_output_tokens": None, "total_model_seconds": None}
     if known_usage and turns:
         cost = 0.0
         for turn in turns:
@@ -441,14 +434,38 @@ def debug_section(debug):
             output_multiplier = 1.5 if multiplier == 2 else 1
             cost += (ordinary * 2 + cached * 0.2 + written * 2.5) * multiplier / 1_000_000
             cost += turn["output_tokens"] * 10 * output_multiplier / 1_000_000
-        trace["estimated_cost_usd"] = round(cost, 6)
-        trace["total_input_tokens"] = sum(turn["input_tokens"] for turn in turns)
-        trace["total_output_tokens"] = sum(turn["output_tokens"] for turn in turns)
-        trace["total_model_seconds"] = round(sum(turn["elapsed_seconds"] for turn in turns), 2)
+        metrics.update({
+            "estimated_cost_usd": round(cost, 6),
+            "total_input_tokens": sum(turn["input_tokens"] for turn in turns),
+            "total_output_tokens": sum(turn["output_tokens"] for turn in turns),
+            "total_model_seconds": round(sum(turn["elapsed_seconds"] for turn in turns), 2),
+        })
+    return metrics
+
+
+def review_trace(debug):
+    metrics = review_metrics(debug)
+    trace = {"model": "gpt-6-sol", "endpoint": "/v1/responses", "store": False,
+             "max_output_tokens": 3000,
+             "instructions": debug.get("instructions", INSTRUCTIONS),
+             "input": "PR text, patch, and commits omitted from public debug output",
+             "turns": debug.get("turns", []), "tools": debug.get("tools", [])}
+    if "review_input_bytes" in debug:
+        trace["review_input_bytes"] = debug["review_input_bytes"]
+        trace["review_input_sha256"] = debug["review_input_sha256"]
+    if debug.get("skip"):
+        trace["skip"] = debug["skip"]
+    if metrics["estimated_cost_usd"] is not None:
+        trace.update(metrics)
         trace["pricing_note"] = ("Estimated from token usage at gpt-6-sol Standard rates. "
                                  "Missing cache-write counts are treated as zero.")
     else:
         trace["estimated_cost_usd"] = None
+    return trace
+
+
+def debug_section(debug):
+    trace = review_trace(debug)
     rendered = html.escape(json.dumps(trace, indent=2, ensure_ascii=True))
     return f"\n<details><summary>Review debug</summary>\n\n<pre>{rendered}</pre>\n</details>\n"
 
@@ -483,31 +500,70 @@ def publish_review(token, number, bot_login, base_sha, head_sha, content, debug=
     return "updated"
 
 
+def short_sha(sha):
+    return sha[:12]
+
+
+def metric_value(value):
+    return "unknown" if value is None else value
+
+
+def log_review_outcome(number, action, head_sha, outcome, started, debug,
+                       level=logging.INFO, stage=None, error_type=None,
+                       http_status=None, http_host=None):
+    metrics = review_metrics(debug)
+    message = ("review outcome pr=%d action=%s head=%s outcome=%s "
+               "elapsed_seconds=%.2f model_turns=%d tool_calls=%d "
+               "input_tokens=%s output_tokens=%s estimated_usd=%s")
+    values = [number, action, short_sha(head_sha), outcome,
+              time.monotonic() - started, metrics["model_turns"],
+              metrics["tool_calls"], metric_value(metrics["total_input_tokens"]),
+              metric_value(metrics["total_output_tokens"]),
+              metric_value(metrics["estimated_cost_usd"])]
+    if stage is not None:
+        message += " stage=%s error_type=%s http_status=%s http_host=%s"
+        values.extend([stage, error_type, metric_value(http_status),
+                       metric_value(http_host)])
+    logging.log(level, message, *values)
+
+
 def worker(jobs, state_dir, api_key, forgejo_token, bot_login):
     checkout = state_dir / "checkout"
     while True:
-        number, base_ref, expected_head = jobs.get()
+        number, base_ref, expected_head, action = jobs.get()
+        started = time.monotonic()
+        debug = {}
+        stage = "precheck"
         try:
+            logging.info("review start pr=%d action=%s head=%s", number, action,
+                         short_sha(expected_head))
             if comment_matches_head(find_comment(forgejo_token, number, bot_login),
                                     expected_head):
-                logging.info("PR #%d head already reviewed", number)
+                log_review_outcome(number, action, expected_head, "already-reviewed",
+                                   started, debug)
                 continue
+            stage = "context"
             title, description = pull_request_context(forgejo_token, number)
+            stage = "collect"
             base_sha, head_sha, review, skip = collect_review(
                 checkout, number, base_ref, expected_head, title, description)
             if head_sha != expected_head:
+                log_review_outcome(number, action, expected_head, "stale", started, debug)
                 continue
             debug = {"skip": skip} if skip else {}
+            stage = "model"
             content = f"Skipped: {skip}" if skip else openai_review(api_key, review, checkout, debug)
+            stage = "publish"
             result = publish_review(forgejo_token, number, bot_login,
                                     base_sha, head_sha, content, debug)
-            logging.info("PR #%d review %s", number, result)
+            log_review_outcome(number, action, expected_head, result, started, debug)
         except urllib.error.HTTPError as exc:
-            logging.error("Review failed for PR #%d: HTTP %d from %s", number,
-                          exc.code, urllib.parse.urlsplit(exc.url).hostname)
-        except (OSError, ValueError, subprocess.CalledProcessError,
-                subprocess.TimeoutExpired, urllib.error.URLError) as exc:
-            logging.error("Review failed for PR #%d: %s", number, type(exc).__name__)
+            host = urllib.parse.urlsplit(exc.url or "").hostname
+            log_review_outcome(number, action, expected_head, "failed", started, debug,
+                               logging.ERROR, stage, type(exc).__name__, exc.code, host)
+        except Exception as exc:
+            log_review_outcome(number, action, expected_head, "failed", started, debug,
+                               logging.ERROR, stage, type(exc).__name__)
         finally:
             jobs.task_done()
 
@@ -533,11 +589,15 @@ def make_handler(secret, jobs):
                 return
             if job:
                 jobs.put(job)
+                number, _base_ref, head_sha, action = job
+                logging.info("review enqueue pr=%d action=%s head=%s", number, action,
+                             short_sha(head_sha))
             self.send_response(202)
             self.end_headers()
 
         def log_message(self, format, *args):
-            logging.info("Webhook request: %s", format % args)
+            log = logging.debug if self.command == "GET" else logging.info
+            log("Webhook request: %s", format % args)
 
     return Handler
 
