@@ -162,6 +162,29 @@ class BotTests(unittest.TestCase):
         self.assertIn("PR description:\nWhy this change is needed", result[2])
         self.assertIn(("diff", "--no-ext-diff", "--binary", f"{merge_base}..{head}"), calls)
 
+    def test_large_patch_offers_per_file_diff_instead_of_skipping(self):
+        head = "a" * 40
+
+        def fake_git(checkout, *args):
+            if args[0] == "rev-parse":
+                return head
+            if args[0] == "merge-base":
+                return "b" * 40
+            if args[0] == "diff" and "--binary" in args:
+                return "+change\n" * 30_000
+            if args[0] == "diff" and "--name-status" in args:
+                return "M\tsrc/main.cpp\n"
+            return ""
+
+        with patch.object(bot, "prepare_checkout"), patch.object(bot, "git",
+                                                                   side_effect=fake_git):
+            _base, _head, review, skip = bot.collect_review(
+                Path("/unused"), 42, "master", head, "Title", "Description")
+        self.assertIsNone(skip)
+        self.assertIn("Use read_diff", review)
+        self.assertIn("M\tsrc/main.cpp", review)
+        self.assertNotIn("+change", review)
+
     def test_fetch_pr_context_from_mirrored_issue(self):
         issue = {"number": 42, "pull_request": {"html_url": "https://example.invalid/pulls/42"},
                  "title": "Fix sanitizer warning", "body": "Reproduced with an empty vector"}
@@ -319,6 +342,56 @@ class BotTests(unittest.TestCase):
             self.assertIn("Only tracked", bot.read_file(checkout, files, "../code.cpp", 1))
             self.assertIn("Only tracked", bot.read_file(checkout, files, "link.cpp", 1))
             self.assertIn("HEAD:code.cpp:1:void target", bot.search_code(checkout, "target"))
+
+    def test_path_base_and_diff_tools_read_only_git_content(self):
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = Path(directory)
+            subprocess.run(["git", "-C", directory, "init", "-q"], check=True)
+            (checkout / "code.cpp").write_text("old behavior\nunchanged\n")
+            (checkout / "link.cpp").symlink_to("code.cpp")
+            subprocess.run(["git", "-C", directory, "add", "code.cpp", "link.cpp"],
+                           check=True)
+            commit = ["git", "-C", directory, "-c", "user.name=Test",
+                      "-c", "user.email=test@example.com", "commit", "-qm"]
+            subprocess.run(commit + ["base"], check=True)
+            base = bot.git(checkout, "rev-parse", "HEAD").strip()
+            (checkout / "code.cpp").write_text("new behavior\nunchanged\n")
+            subprocess.run(["git", "-C", directory, "add", "code.cpp"], check=True)
+            subprocess.run(commit + ["change"], check=True)
+
+            files = bot.tracked_files(checkout)
+            base_files = bot.tracked_files_at(checkout, base)
+            changed = set(bot.git(checkout, "diff", "--name-only", "-z",
+                                  f"{base}..HEAD").split("\x00"))
+            self.assertEqual(bot.find_paths(files, "CODE"), "code.cpp\n")
+            self.assertEqual(bot.find_paths(files, "missing"), "No matching tracked files.")
+            self.assertNotIn("link.cpp", base_files)
+            self.assertIn("1: old behavior", bot.read_file(checkout, base_files,
+                                                           "code.cpp", 1))
+            self.assertIn("1: new behavior", bot.read_file(checkout, files,
+                                                           "code.cpp", 1))
+            diff = bot.read_diff(checkout, changed, base, "code.cpp", 1)
+            self.assertIn("-old behavior", diff)
+            self.assertIn("+new behavior", diff)
+            self.assertIn("No diff lines", bot.read_diff(checkout, changed, base,
+                                                         "code.cpp", 100))
+            self.assertIn("Invalid", bot.read_diff(checkout, changed, base,
+                                                   "link.cpp", 1))
+
+    def test_force_rechecks_same_head_and_updates_existing_comment(self):
+        existing = {"body": bot.review_body("b" * 40, "a" * 40, "Old review.")}
+        with patch.object(bot, "find_comment", return_value=existing) as find, \
+                patch.object(bot, "pull_request_context", return_value=("Title", "Body")), \
+                patch.object(bot, "collect_review",
+                             return_value=("b" * 40, "a" * 40, "review input", None)), \
+                patch.object(bot, "openai_review", return_value="New review.") as model, \
+                patch.object(bot, "publish_review", return_value="updated") as publish:
+            with self.assertRaises(StopIteration):
+                bot.worker(JobSource((42, "master", "a" * 40, "opened", True)),
+                           Path("/unused"), "openai-key", "forgejo-token", "review-bot")
+        find.assert_not_called()
+        model.assert_called_once()
+        publish.assert_called_once()
 
     def test_publish_creates_then_edits_one_bot_comment(self):
         comments = [{"id": 1, "user": {"login": "someone-else"},

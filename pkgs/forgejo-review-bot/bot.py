@@ -36,12 +36,33 @@ BRANCH = re.compile(r"^[A-Za-z0-9._/-]+$")
 DEFAULT_PROMPT_FILE = Path(__file__).with_name("prompt.md")
 INSTRUCTIONS = None
 TOOLS = [
+    {"type": "function", "name": "find_paths", "strict": True,
+     "description": "Find tracked file paths at the PR head containing a case-insensitive "
+                    "substring. Use when you do not know a file's exact path.",
+     "parameters": {"type": "object", "properties": {
+         "query": {"type": "string", "description": "Filename or path substring"}},
+         "required": ["query"], "additionalProperties": False}},
     {"type": "function", "name": "read_file", "strict": True,
      "description": "Read numbered lines from a tracked text file at the PR head. "
                     "Use another call for later lines.",
      "parameters": {"type": "object", "properties": {
          "path": {"type": "string", "description": "Repository-relative file path"},
          "start_line": {"type": "integer", "description": "First line, starting at 1"}},
+         "required": ["path", "start_line"], "additionalProperties": False}},
+    {"type": "function", "name": "read_base_file", "strict": True,
+     "description": "Read numbered lines from a tracked text file at the PR merge base. "
+                    "Use to compare behavior before the PR.",
+     "parameters": {"type": "object", "properties": {
+         "path": {"type": "string", "description": "Repository-relative file path at the merge base"},
+         "start_line": {"type": "integer", "description": "First line, starting at 1"}},
+         "required": ["path", "start_line"], "additionalProperties": False}},
+    {"type": "function", "name": "read_diff", "strict": True,
+     "description": "Read numbered lines from one changed file's PR diff. "
+                    "Use for large patches or to revisit a specific change. "
+                    "Line numbers count lines in the diff, not the source file.",
+     "parameters": {"type": "object", "properties": {
+         "path": {"type": "string", "description": "Changed repository-relative file path"},
+         "start_line": {"type": "integer", "description": "First diff line, starting at 1"}},
          "required": ["path", "start_line"], "additionalProperties": False}},
     {"type": "function", "name": "search_code", "strict": True,
      "description": "Search tracked text files at the PR head for a literal string. "
@@ -163,25 +184,51 @@ def collect_review(checkout, number, base_ref, expected_head, title, description
     git(checkout, "checkout", "--detach", "--force", "-q", actual_head)
     commits = git(checkout, "log", "--reverse", "--format=%H%n%B%n%x00", f"{merge_base}..{actual_head}")
     patch = git(checkout, "diff", "--no-ext-diff", "--binary", f"{merge_base}..{actual_head}")
-    review = (f"PR title: {title}\nPR description:\n{description}\n"
-              f"Commits:\n{commits}\nPatch:\n{patch}")
+    prelude = (f"PR title: {title}\nPR description:\n{description}\n"
+               f"Commits:\n{commits}\n")
+    review = f"{prelude}Patch:\n{patch}"
     if len(review.encode()) > MAX_REVIEW_BYTES:
-        return base_sha, actual_head, None, f"Review input exceeds {MAX_REVIEW_BYTES} bytes"
+        changed = git(checkout, "diff", "--no-ext-diff", "--name-status",
+                      f"{merge_base}..{actual_head}")
+        review = (f"{prelude}Patch exceeds {MAX_REVIEW_BYTES} input bytes. "
+                  "Use read_diff to inspect changed files.\nChanged files:\n"
+                  f"{changed}")
+        if len(review.encode()) > MAX_REVIEW_BYTES:
+            return base_sha, actual_head, None, f"Review input exceeds {MAX_REVIEW_BYTES} bytes"
     return base_sha, actual_head, review, None
 
 
 def tracked_files(checkout):
     """Map tracked regular paths to their checked-out Git blob IDs."""
-    entries = git(checkout, "ls-files", "--stage", "-z").split("\x00")
+    return tracked_files_at(checkout, "HEAD")
+
+
+def tracked_files_at(checkout, ref):
+    entries = git(checkout, "ls-tree", "-r", "-z", "--full-tree", ref).split("\x00")
     files = {}
     for entry in entries:
         if not entry:
             continue
         metadata, path = entry.split("\t", 1)
-        mode, blob, stage = metadata.split()
-        if stage == "0" and mode in {"100644", "100755"}:
+        mode, kind, blob = metadata.split()
+        if kind == "blob" and mode in {"100644", "100755"}:
             files[path] = blob
     return files
+
+
+def find_paths(files, query):
+    if (not isinstance(query, str) or not 1 <= len(query) <= 100
+            or "\n" in query or "\r" in query or "\x00" in query):
+        return "Path query must be 1 to 100 characters on one line."
+    result = ""
+    for path in files:
+        if query.casefold() not in path.casefold():
+            continue
+        line = f"{path}\n"
+        if len((result + line).encode()) > MAX_TOOL_BYTES:
+            return result + "[Results truncated]"
+        result += line
+    return result or "No matching tracked files."
 
 
 def read_file(checkout, files, path, start_line):
@@ -208,6 +255,43 @@ def read_file(checkout, files, path, start_line):
             break
         result += line
     return result
+
+
+def read_diff(checkout, changed_paths, base, path, start_line):
+    if (not isinstance(path, str) or path not in changed_paths
+            or not isinstance(start_line, int) or isinstance(start_line, bool)
+            or not 1 <= start_line <= 100_000):
+        return "Invalid changed path or diff line."
+    process = subprocess.Popen(
+        ["git", "-C", str(checkout), "diff", "--no-ext-diff", "--no-color",
+         f"{base}..HEAD", "--", path],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+    )
+    result = f"{path} (diff lines from {start_line}):\n"
+    found = False
+    stopped_early = False
+    try:
+        for number, line in enumerate(process.stdout, 1):
+            if number < start_line:
+                continue
+            found = True
+            item = f"{number}: {line}"
+            if len((result + item).encode()) > MAX_TOOL_BYTES:
+                result += f"[Diff line {number} exceeds output limit; continue at {number + 1}]\n"
+                stopped_early = True
+                break
+            result += item
+            if number >= start_line + 149:
+                stopped_early = True
+                break
+    finally:
+        if stopped_early and process.poll() is None:
+            process.kill()
+        process.wait(timeout=10)
+        process.stdout.close()
+    if not stopped_early and process.returncode:
+        raise subprocess.CalledProcessError(process.returncode, process.args)
+    return result if found else result + "No diff lines."
 
 
 def search_code(checkout, query):
@@ -242,6 +326,9 @@ def openai_review(api_key, review, checkout, debug=None):
                       "review_input_sha256": hashlib.sha256(review_bytes).hexdigest(),
                       "turns": [], "tools": []})
     calls_used = 0
+    merge_base = None
+    base_files = None
+    changed_paths = None
     for turn in range(MAX_MODEL_TURNS):
         input_data = json.dumps(inputs).encode()
         tool_choice = ("required" if turn == 0 else
@@ -295,9 +382,29 @@ def openai_review(api_key, review, checkout, debug=None):
                     calls_used += 1
                     try:
                         args = json.loads(call["arguments"])
-                        if call["name"] == "read_file":
+                        if call["name"] == "find_paths":
+                            answer = find_paths(files, args.get("query"))
+                        elif call["name"] == "read_file":
                             answer = read_file(checkout, files, args.get("path"),
                                                args.get("start_line"))
+                        elif call["name"] == "read_base_file":
+                            if merge_base is None:
+                                merge_base = git(checkout, "merge-base", "refs/review-bot/base",
+                                                 "HEAD").strip()
+                            if base_files is None:
+                                base_files = tracked_files_at(checkout, merge_base)
+                            answer = read_file(checkout, base_files, args.get("path"),
+                                               args.get("start_line"))
+                        elif call["name"] == "read_diff":
+                            if merge_base is None:
+                                merge_base = git(checkout, "merge-base", "refs/review-bot/base",
+                                                 "HEAD").strip()
+                            if changed_paths is None:
+                                changed_paths = set(git(checkout, "diff", "--no-ext-diff",
+                                                        "--name-only", "-z",
+                                                        f"{merge_base}..HEAD").split("\x00"))
+                            answer = read_diff(checkout, changed_paths, merge_base,
+                                               args.get("path"), args.get("start_line"))
                         elif call["name"] == "search_code":
                             answer = search_code(checkout, args.get("query"))
                         else:
