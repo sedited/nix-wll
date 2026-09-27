@@ -142,6 +142,7 @@ def parse_event(event, payload):
     number = pr.get("number", payload.get("number"))
     base_ref = base.get("ref")
     head_sha = head.get("sha", "")
+    force = payload.get("review_bot_force", False)
     html_url = repo.get("html_url", "").rstrip("/")
     if (repo.get("full_name") != REPOSITORY
             or (REPOSITORY_URL is not None and html_url != REPOSITORY_URL.rstrip("/"))
@@ -151,7 +152,9 @@ def parse_event(event, payload):
             or base_ref.endswith("/") or base_ref.endswith(".lock")
             or not isinstance(head_sha, str) or not SHA.fullmatch(head_sha)):
         raise ValueError("invalid or unexpected pull request payload")
-    return number, base_ref, head_sha, payload["action"]
+    if not isinstance(force, bool):
+        raise ValueError("invalid review override")
+    return number, base_ref, head_sha, payload["action"], force
 
 
 def git(checkout, *args):
@@ -611,15 +614,15 @@ def log_review_outcome(number, action, head_sha, outcome, started, debug,
 def worker(jobs, state_dir, api_key, forgejo_token, bot_login):
     checkout = state_dir / "checkout"
     while True:
-        number, base_ref, expected_head, action = jobs.get()
+        number, base_ref, expected_head, action, force = jobs.get()
         started = time.monotonic()
         debug = {}
         stage = "precheck"
         try:
-            logging.info("review start pr=%d action=%s head=%s", number, action,
-                         short_sha(expected_head))
-            if comment_matches_head(find_comment(forgejo_token, number, bot_login),
-                                    expected_head):
+            logging.info("review start pr=%d action=%s head=%s force=%s", number, action,
+                         short_sha(expected_head), force)
+            if not force and comment_matches_head(
+                    find_comment(forgejo_token, number, bot_login), expected_head):
                 log_review_outcome(number, action, expected_head, "already-reviewed",
                                    started, debug)
                 continue
@@ -670,9 +673,9 @@ def make_handler(secret, jobs):
                 return
             if job:
                 jobs.put(job)
-                number, _base_ref, head_sha, action = job
-                logging.info("review enqueue pr=%d action=%s head=%s", number, action,
-                             short_sha(head_sha))
+                number, _base_ref, head_sha, action, force = job
+                logging.info("review enqueue pr=%d action=%s head=%s force=%s", number,
+                             action, short_sha(head_sha), force)
             self.send_response(202)
             self.end_headers()
 

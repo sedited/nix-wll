@@ -5,12 +5,18 @@ first-pass review on Forgejo pull requests.
 
 The bot fetches the base branch and PR head into its own state directory,
 reviews the PR title, description, commit messages, and diff, and gives the
-model two read-only repository tools: numbered file reads and literal code
-search. It never builds, runs, or tests pull request code.
+model read-only tools for path discovery, numbered head and merge-base file
+reads, per-file diff reads, and literal code search. Large patches are replaced
+by a changed-file list so the model can read relevant diffs on demand. It never
+builds, runs, or tests pull request code.
 
 The bot writes at most one comment per pull request. New reviews edit the
 existing bot-owned comment when the content changes, and leave it untouched
 when it is already current.
+
+To rerun a review after changing the prompt or tools without a new PR commit,
+send a signed synthetic pull request webhook with `"review_bot_force": true`.
+Normal Forgejo webhooks leave this field unset.
 
 ## Minimal configuration
 

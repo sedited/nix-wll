@@ -70,9 +70,12 @@ class BotTests(unittest.TestCase):
 
     def test_event_filters_and_rejects_other_repository(self):
         self.assertEqual(bot.parse_event("pull_request", payload()),
-                         (42, "master", "a" * 40, "opened"))
+                         (42, "master", "a" * 40, "opened", False))
         self.assertEqual(bot.parse_event("pull_request", payload("synchronize")),
-                         (42, "master", "a" * 40, "synchronize"))
+                         (42, "master", "a" * 40, "synchronize", False))
+        forced = payload()
+        forced["review_bot_force"] = True
+        self.assertEqual(bot.parse_event("pull_request", forced)[-1], True)
         self.assertIsNone(bot.parse_event("push", payload()))
         self.assertIsNone(bot.parse_event("pull_request", payload("closed")))
         wrong = payload()
@@ -93,9 +96,17 @@ class BotTests(unittest.TestCase):
                 "X-Forgejo-Signature": sig, "X-Forgejo-Event": "pull_request"})
             with self.assertLogs(level="INFO") as logs:
                 self.assertEqual(urllib.request.urlopen(request).status, 202)
-            self.assertEqual(jobs.get_nowait(), (42, "master", "a" * 40, "opened"))
+            self.assertEqual(jobs.get_nowait(), (42, "master", "a" * 40, "opened", False))
             self.assertIn("review enqueue pr=42 action=opened head=aaaaaaaaaaaa",
                           "\n".join(logs.output))
+            forced = payload()
+            forced["review_bot_force"] = True
+            body = json.dumps(forced).encode()
+            sig = hmac.new(b"secret", body, hashlib.sha256).hexdigest()
+            request = urllib.request.Request(url, body, headers={
+                "X-Forgejo-Signature": sig, "X-Forgejo-Event": "pull_request"})
+            self.assertEqual(urllib.request.urlopen(request).status, 202)
+            self.assertEqual(jobs.get_nowait(), (42, "master", "a" * 40, "opened", True))
             request.headers["X-Forgejo-Signature"] = "bad"
             with self.assertRaises(urllib.error.HTTPError) as error:
                 urllib.request.urlopen(request)
@@ -497,7 +508,7 @@ class BotTests(unittest.TestCase):
                 patch.object(bot, "collect_review") as collect, \
                 patch.object(bot, "openai_review") as model:
             with self.assertLogs(level="INFO") as logs, self.assertRaises(StopIteration):
-                bot.worker(JobSource((42, "master", "a" * 40, "opened")),
+                bot.worker(JobSource((42, "master", "a" * 40, "opened", False)),
                            Path("/unused"), "openai-key", "forgejo-token", "review-bot")
         collect.assert_not_called()
         model.assert_not_called()
@@ -518,7 +529,7 @@ class BotTests(unittest.TestCase):
                 patch.object(bot, "openai_review", side_effect=review), \
                 patch.object(bot, "publish_review", return_value="created"):
             with self.assertLogs(level="INFO") as logs, self.assertRaises(StopIteration):
-                bot.worker(JobSource((42, "master", "a" * 40, "synchronize")),
+                bot.worker(JobSource((42, "master", "a" * 40, "synchronize", False)),
                            Path("/unused"), "openai-key", "forgejo-token", "review-bot")
         output = "\n".join(logs.output)
         self.assertIn("review start pr=42 action=synchronize head=aaaaaaaaaaaa", output)
@@ -537,7 +548,7 @@ class BotTests(unittest.TestCase):
                 patch.object(bot, "openai_review") as model, \
                 patch.object(bot, "publish_review") as publish:
             with self.assertLogs(level="INFO") as logs, self.assertRaises(StopIteration):
-                bot.worker(JobSource((42, "master", "a" * 40, "synchronize")),
+                bot.worker(JobSource((42, "master", "a" * 40, "synchronize", False)),
                            Path("/unused"), "openai-key", "forgejo-token", "review-bot")
         model.assert_not_called()
         publish.assert_not_called()
@@ -550,7 +561,7 @@ class BotTests(unittest.TestCase):
         error = urllib.error.HTTPError("https://git.fish.foo/api", 503, "down", {}, None)
         with patch.object(bot, "find_comment", side_effect=error):
             with self.assertLogs(level="ERROR") as logs, self.assertRaises(StopIteration):
-                bot.worker(JobSource((42, "master", "a" * 40, "opened")),
+                bot.worker(JobSource((42, "master", "a" * 40, "opened", False)),
                            Path("/unused"), "openai-key", "forgejo-token", "review-bot")
         output = "\n".join(logs.output)
         self.assertIn("outcome=failed", output)
@@ -564,8 +575,8 @@ class BotTests(unittest.TestCase):
         with patch.object(bot, "find_comment",
                           side_effect=[RuntimeError("token-secret"), existing]):
             with self.assertLogs(level="INFO") as logs, self.assertRaises(StopIteration):
-                bot.worker(JobSource((42, "master", "a" * 40, "opened"),
-                                     (43, "master", "b" * 40, "synchronize")),
+                bot.worker(JobSource((42, "master", "a" * 40, "opened", False),
+                                     (43, "master", "b" * 40, "synchronize", False)),
                            Path("/unused"), "openai-key", "forgejo-token", "review-bot")
         output = "\n".join(logs.output)
         self.assertIn("pr=42", output)
