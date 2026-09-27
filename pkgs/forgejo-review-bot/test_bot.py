@@ -292,6 +292,15 @@ class BotTests(unittest.TestCase):
         self.assertNotIn("<script>", body)
         self.assertEqual(body.count("</details>"), 1)
 
+    def test_review_body_starts_with_commit_ids(self):
+        base = "b" * 40
+        head = "a" * 40
+        body = bot.review_body(base, head, "No findings.")
+        self.assertTrue(body.startswith(
+            f"{bot.COMMENT_MARKER}\nBase: `{base}`  \nHead: `{head}`\n\n"))
+        self.assertNotIn("First-pass review", body)
+        self.assertTrue(bot.comment_matches_head({"body": body}, head))
+
     def test_context_tools_read_tracked_files_only(self):
         with tempfile.TemporaryDirectory() as directory:
             checkout = Path(directory)
