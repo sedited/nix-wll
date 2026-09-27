@@ -14,6 +14,7 @@ stable named flake output.
 | `nixosModules.bitcoin-dnsseed` | `services.bitcoinDnsSeed` | Bitcoin DNS seed deployment using `dnsseedrs`, CoreDNS, DNSSEC key material, optional Tor/I2P proxies, and Caddy seed dumps. |
 | `nixosModules.bitcoin-core-guix-substitutes` | `services.bitcoinCoreGuixSubstitutes` | Bitcoin Core Guix substitute publisher with optional immutable manifest builder, signing-key publication, and Caddy wiring. |
 | `nixosModules.dnsseedrs` | `services.dnsseedrs` | Generic multi-instance dnsseedrs service module. |
+| `nixosModules.forgejo-review-bot` | `services.forgejoReviewBot` | Forgejo pull request first-pass review bot with one editable comment per PR. |
 | `nixosModules.forgejo-site` | `services.forgejoSite` | Forgejo site deployment with Caddy, optional Anubis, sops-managed secrets, mailer settings, and initial admin bootstrap. |
 | `nixosModules.radicle-mirror` | `services.radicleMirror` | Public Radicle seed, Radicle Explorer frontend, and scheduled Bitcoin Core Git mirror. |
 | `nixosModules.stuntman` | `services.stuntman` | STUNTMAN STUN server plus the `btcpunch` UDP rendezvous helper. |
@@ -23,6 +24,7 @@ stable named flake output.
 | Output | Purpose |
 | --- | --- |
 | `packages.<system>.dnsseedrs` | Bitcoin DNS seeder built from `willcl-ark/dnsseedrs`. |
+| `packages.<system>.forgejo-review-bot` | Forgejo pull request first-pass review bot. |
 
 ## Usage
 
@@ -75,11 +77,13 @@ modules/
   bitcoin-core-guix-substitutes/
   bitcoin-dnsseed/
   dnsseedrs/
+  forgejo-review-bot/
   forgejo-site/
   radicle-mirror/
   stuntman/
 pkgs/
   dnsseedrs/
+  forgejo-review-bot/
 ```
 
 Each module directory may contain:
