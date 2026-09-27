@@ -28,8 +28,9 @@ MAX_BODY = 1024 * 1024
 MAX_REVIEW_BYTES = 200_000
 MAX_FILE_BYTES = 1_000_000
 MAX_TOOL_BYTES = 12_000
-MAX_TOOL_CALLS = 12
-MAX_MODEL_TURNS = 8
+MAX_TOOL_CALLS = 24
+MAX_MODEL_TURNS = 10
+MAX_OUTPUT_TOKENS = 6_000
 SHA = re.compile(r"^[0-9a-f]{40}$")
 BRANCH = re.compile(r"^[A-Za-z0-9._/-]+$")
 DEFAULT_PROMPT_FILE = Path(__file__).with_name("prompt.md")
@@ -249,7 +250,7 @@ def openai_review(api_key, review, checkout, debug=None):
         payload = json.dumps({"model": "gpt-6-sol", "store": False,
                               "instructions": prompt, "input": inputs,
                               "tools": TOOLS, "tool_choice": tool_choice,
-                              "max_output_tokens": 3000}).encode()
+                              "max_output_tokens": MAX_OUTPUT_TOKENS}).encode()
         request = urllib.request.Request(
             "https://api.openai.com/v1/responses",
             data=payload,
@@ -419,7 +420,7 @@ def review_trace(debug):
     prompt = instructions()
     metrics = review_metrics(debug)
     trace = {"model": "gpt-6-sol", "endpoint": "/v1/responses", "store": False,
-             "max_output_tokens": 3000,
+             "max_output_tokens": MAX_OUTPUT_TOKENS,
              "instructions": debug.get("instructions", prompt),
              "input": "PR text, patch, and commits omitted from public debug output",
              "turns": debug.get("turns", []), "tools": debug.get("tools", [])}
