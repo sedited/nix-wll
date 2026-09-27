@@ -65,6 +65,8 @@ Useful defaults:
 - `services.forgejoReviewBot.stateDir = "/var/lib/forgejo-review-bot"`
 - `services.forgejoReviewBot.commentMarker = null`, which uses
   `<!-- forgejo-review-bot:${repository} -->`
+- `services.forgejoReviewBot.promptFile =
+  "${services.forgejoReviewBot.package}/share/forgejo-review-bot/prompt.md"`
 
 Set `repositoryUrl` only when the HTML URL in Forgejo webhook payloads cannot
 be derived from `forgejoApi`.

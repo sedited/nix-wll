@@ -195,6 +195,32 @@ class BotTests(unittest.TestCase):
         self.assertEqual(sent["model"], "gpt-6-sol")
         self.assertEqual(sent["tool_choice"], "required")
 
+    def test_openai_request_uses_loaded_prompt_file(self):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+            def read(self, *args):
+                return json.dumps({"status": "completed", "output": [{"type": "message",
+                    "content": [{"type": "output_text", "text": "No findings."}]}]}).encode()
+
+        with tempfile.TemporaryDirectory() as directory:
+            prompt_file = Path(directory) / "prompt.md"
+            prompt_file.write_text("Custom review prompt\n")
+            debug = {}
+            with patch.object(bot.urllib.request, "urlopen", return_value=Response()) as send, \
+                    patch.object(bot, "tracked_files", return_value={}), \
+                    patch.object(bot, "INSTRUCTIONS", bot.load_prompt_file(prompt_file)):
+                self.assertEqual(bot.openai_review("test-key", "patch", Path("/unused"), debug),
+                                 "No findings.")
+        request = send.call_args.args[0]
+        sent = json.loads(request.data)
+        self.assertEqual(sent["instructions"], "Custom review prompt")
+        self.assertEqual(debug["instructions"], "Custom review prompt")
+
     def test_model_reads_context_then_finishes_with_stateless_history(self):
         call = {"type": "function_call", "id": "fc_1", "call_id": "call_1",
                 "name": "read_file", "arguments": '{"path":"src/main.cpp","start_line":1}'}

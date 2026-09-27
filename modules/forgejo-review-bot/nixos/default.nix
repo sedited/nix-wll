@@ -25,6 +25,8 @@ let
     cfg.forgejoApi
     "--comment-marker"
     commentMarker
+    "--prompt-file"
+    cfg.promptFile
     "--openai-key-file"
     cfg.openaiKeyFile
     "--webhook-secret-file"
@@ -79,6 +81,13 @@ in
       default = null;
       defaultText = lib.literalExpression "\"<!-- forgejo-review-bot:\${config.services.forgejoReviewBot.repository} -->\"";
       description = "Hidden marker used to find and update the bot's existing comment.";
+    };
+
+    promptFile = lib.mkOption {
+      type = lib.types.path;
+      default = "${cfg.package}/share/forgejo-review-bot/prompt.md";
+      defaultText = lib.literalExpression "\"\${config.services.forgejoReviewBot.package}/share/forgejo-review-bot/prompt.md\"";
+      description = "Markdown file containing the review prompt.";
     };
 
     listenAddress = lib.mkOption {

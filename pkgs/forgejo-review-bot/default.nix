@@ -29,6 +29,8 @@ stdenvNoCC.mkDerivation {
   installPhase = ''
     runHook preInstall
     install -Dm755 bot.py $out/libexec/forgejo-review-bot/bot.py
+    install -Dm644 prompt.md $out/libexec/forgejo-review-bot/prompt.md
+    install -Dm644 prompt.md $out/share/forgejo-review-bot/prompt.md
     makeWrapper ${python3.interpreter} $out/bin/forgejo-review-bot \
       --add-flags $out/libexec/forgejo-review-bot/bot.py \
       --prefix PATH : ${lib.makeBinPath [ git ]}
