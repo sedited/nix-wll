@@ -1,9 +1,10 @@
 {
   "independent": "gpt-6-sol",
+  "adversarial": "gpt-6-sol",
   "state": "gpt-6-luna",
   "public_contract": "gpt-6-luna",
   "tests": "gpt-6-luna",
   "developer_notes": "gpt-6-luna",
-  "verifier": "gpt-6-sol",
+  "verifier": "gpt-6-luna",
   "collator": "gpt-6-luna"
 }

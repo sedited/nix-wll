@@ -61,6 +61,28 @@ class BotTests(unittest.TestCase):
                       "https://git.example.org/owner/repo")
         self.assertEqual(bot.REPOSITORY_URL, "https://git.example.org/owner/repo")
 
+    def test_model_config_requires_adversarial_stage_and_prompt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            audit_dir = Path(directory)
+            for name in ("common", "adversarial", *bot.AUDIT_NAMES,
+                         "verifier", "collator"):
+                (audit_dir / f"{name}.md").write_text(f"{name} instructions\n")
+            models = {name: "gpt-6-sol" if name in
+                      ("independent", "adversarial") else "gpt-6-luna"
+                      for name in bot.MODEL_NAMES}
+            (audit_dir / "models.json").write_text(json.dumps(models))
+            with patch.object(bot, "AUDIT_PROMPTS", None), \
+                    patch.object(bot, "MODELS", None):
+                bot.configure_audit_prompts(audit_dir)
+                self.assertEqual(bot.audit_prompts()["adversarial"],
+                                 "adversarial instructions")
+                self.assertEqual(bot.stage_models()["adversarial"], "gpt-6-sol")
+                self.assertEqual(bot.stage_models()["verifier"], "gpt-6-luna")
+                del models["adversarial"]
+                (audit_dir / "models.json").write_text(json.dumps(models))
+                with self.assertRaisesRegex(ValueError, "each review stage"):
+                    bot.configure_audit_prompts(audit_dir)
+
     def test_signature_checks_raw_body(self):
         body = b'{"action":"opened"}'
         sig = hmac.new(b"secret", body, hashlib.sha256).hexdigest()
@@ -581,6 +603,20 @@ class BotTests(unittest.TestCase):
         self.assertEqual(metrics["total_input_tokens"], 1600)
         self.assertEqual(metrics["total_output_tokens"], 4205)
 
+    def test_review_metrics_include_adversarial_sol_turns_and_tools(self):
+        turn = {"input_tokens": 100, "cached_tokens": 0,
+                "cache_write_tokens": 0, "output_tokens": 10,
+                "elapsed_seconds": 1.0}
+        debug = {"turns": [turn], "tools": [{"name": "read_file"}],
+                 "adversarial": {"turns": [turn],
+                                 "tools": [{"name": "search_code"}]}}
+        metrics = bot.review_metrics(debug)
+        self.assertEqual(metrics["model_turns"], 2)
+        self.assertEqual(metrics["tool_calls"], 2)
+        self.assertEqual(metrics["total_input_tokens"], 200)
+        self.assertEqual(metrics["total_output_tokens"], 20)
+        self.assertEqual(metrics["estimated_cost_usd"], 0.0006)
+
     def test_review_body_starts_with_commit_ids(self):
         base = "b" * 40
         head = "a" * 40
@@ -661,31 +697,46 @@ class BotTests(unittest.TestCase):
         self.assertEqual(model.call_args.args[1], "review input")
         publish.assert_called_once()
 
-    def test_independent_review_precedes_candidate_verification_and_formatting(self):
+    def test_six_independent_reviews_reach_verifier_and_collator(self):
         calls = []
+        parallel_stage = threading.Barrier(3, timeout=3)
+        candidates = ["Independent finding", "Adversarial finding",
+                      *(f"{name} finding" for name in bot.AUDIT_NAMES)]
 
         def audit(api_key, review, checkout, debug):
             self.assertEqual(review, "Original PR input")
+            parallel_stage.wait()
             debug["audits"] = []
-            return "Focused Luna reviews:\nstate:\nLuna finding"
+            return "Focused Luna reviews:\n" + "\n".join(
+                f"{name}:\n{name} finding" for name in bot.AUDIT_NAMES)
 
         def model(api_key, review, checkout, debug, current_pr, prompt=None,
                   model=None):
-            calls.append(("sol", review, prompt))
+            calls.append(("sol", review, prompt, model))
             if prompt is None:
                 self.assertEqual(review, "Original PR input")
+                self.assertNotIn("Adversarial finding", review)
+                parallel_stage.wait()
                 return "Independent finding"
-            self.assertIn("Independent finding", review)
-            self.assertIn("Luna finding", review)
+            if prompt == "Adversarial prompt":
+                self.assertEqual(review, "Original PR input")
+                self.assertEqual(model, "gpt-6-sol")
+                parallel_stage.wait()
+                return "Adversarial finding"
+            self.assertEqual(prompt, bot.audit_prompts()["verifier"])
+            self.assertEqual(model, "gpt-6-luna")
+            for candidate in candidates:
+                self.assertIn(candidate, review)
             self.assertIn("Original PR input", review)
-            return "ACCEPT Independent finding; REJECT Luna finding"
+            return "ACCEPT Independent finding; ACCEPT Adversarial finding"
 
         def collate(api_key, name, prompt, review):
             calls.append(("collator", review, prompt))
             self.assertEqual(name, "collator")
             self.assertNotIn("Original PR input", review)
-            self.assertIn("Independent finding", review)
-            self.assertIn("REJECT Luna finding", review)
+            for candidate in candidates:
+                self.assertIn(candidate, review)
+            self.assertIn("ACCEPT Adversarial finding", review)
             return "##### 🟠 Major\nIndependent finding", {
                 "name": "collator", "model": "gpt-6-luna", "status": "completed",
                 "output_truncated": False}
@@ -693,13 +744,20 @@ class BotTests(unittest.TestCase):
         debug = {}
         with patch.object(bot, "run_audits", side_effect=audit), \
                 patch.object(bot, "openai_review", side_effect=model), \
-                patch.object(bot, "run_audit", side_effect=collate):
+                patch.object(bot, "run_audit", side_effect=collate), \
+                patch.object(bot, "audit_prompts", return_value={
+                    "adversarial": "Adversarial prompt", "verifier": "Verifier prompt",
+                    "collator": "Collator prompt"}):
             result = bot.review_with_independent_passes(
                 "key", "Original PR input", Path("/unused"), 42, debug)
         self.assertIn("Independent finding", result)
-        self.assertEqual([call[0] for call in calls], ["sol", "sol", "collator"])
+        self.assertEqual([call[0] for call in calls],
+                         ["sol", "sol", "sol", "collator"])
         self.assertIn("independent_review_sha256", debug)
+        self.assertEqual(debug["adversarial_review_sha256"],
+                         hashlib.sha256(b"Adversarial finding").hexdigest())
         self.assertIn("verification_output_sha256", debug)
+        self.assertIn("adversarial", bot.review_trace(debug))
 
     def test_incomplete_collation_prevents_publication(self):
         debug = {}
@@ -707,7 +765,10 @@ class BotTests(unittest.TestCase):
                 patch.object(bot, "openai_review", return_value="No candidate finding."), \
                 patch.object(bot, "run_audit", return_value=(
                     "Audit unavailable.", {"status": "incomplete",
-                                           "output_truncated": False})):
+                                           "output_truncated": False})), \
+                patch.object(bot, "audit_prompts", return_value={
+                    "adversarial": "Adversarial prompt", "verifier": "Verifier prompt",
+                    "collator": "Collator prompt"}):
             with self.assertRaisesRegex(ValueError, "collator"):
                 bot.review_with_independent_passes(
                     "key", "PR input", Path("/unused"), 42, debug)

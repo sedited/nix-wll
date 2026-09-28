@@ -43,7 +43,7 @@ BRANCH = re.compile(r"^[A-Za-z0-9._/-]+$")
 DEFAULT_PROMPT_FILE = Path(__file__).with_name("prompt.md")
 DEFAULT_AUDIT_DIR = Path(__file__).with_name("audits")
 AUDIT_NAMES = ("state", "public_contract", "tests", "developer_notes")
-MODEL_NAMES = ("independent", *AUDIT_NAMES, "verifier", "collator")
+MODEL_NAMES = ("independent", "adversarial", *AUDIT_NAMES, "verifier", "collator")
 MODEL_RATES = {"gpt-6-luna": (0.1, 0.01, 0.125, 0.5),
                "gpt-6-sol": (2, 0.2, 2.5, 10)}
 INSTRUCTIONS = None
@@ -133,7 +133,8 @@ def instructions():
 def configure_audit_prompts(directory):
     global AUDIT_PROMPTS, MODELS
     prompts = {name: load_prompt_file(directory / f"{name}.md")
-               for name in ("common", *AUDIT_NAMES, "verifier", "collator")}
+               for name in ("common", "adversarial", *AUDIT_NAMES,
+                            "verifier", "collator")}
     if any(not prompt.strip() for prompt in prompts.values()):
         raise ValueError("audit prompt files must not be empty")
     models = json.loads((directory / "models.json").read_text(encoding="utf-8"))
@@ -682,15 +683,24 @@ def openai_review(api_key, review, checkout, debug=None, current_pr=None,
 def review_with_independent_passes(api_key, review, checkout, current_pr, debug):
     debug["pipeline_stage"] = "independent"
     sol_debug = {}
-    with ThreadPoolExecutor(max_workers=2) as pool:
+    adversarial_debug = {}
+    debug["adversarial"] = adversarial_debug
+    with ThreadPoolExecutor(max_workers=3) as pool:
         audits_future = pool.submit(run_audits, api_key, review, checkout, debug)
         sol_future = pool.submit(openai_review, api_key, review, checkout,
                                  sol_debug, current_pr)
+        adversarial_future = pool.submit(
+            openai_review, api_key, review, checkout, adversarial_debug, current_pr,
+            prompt=audit_prompts()["adversarial"], model=stage_models()["adversarial"])
         sol_review = sol_future.result()
+        adversarial_review = adversarial_future.result()
         luna_reviews = audits_future.result()
     debug.update(sol_debug)
     debug["independent_review_sha256"] = hashlib.sha256(sol_review.encode()).hexdigest()
-    reviews = f"Independent Sol review:\n{sol_review}\n\n{luna_reviews}"
+    debug["adversarial_review_sha256"] = hashlib.sha256(
+        adversarial_review.encode()).hexdigest()
+    reviews = (f"Independent Sol review:\n{sol_review}\n\n"
+               f"Adversarial Sol review:\n{adversarial_review}\n\n{luna_reviews}")
 
     debug["pipeline_stage"] = "verification"
     verification_debug = {}
@@ -864,12 +874,16 @@ def current_head(number):
 def review_metrics(debug):
     models = stage_models()
     independent_turns = debug.get("turns", [])
+    adversarial_turns = debug.get("adversarial", {}).get("turns", [])
     verifier_turns = debug.get("verification", {}).get("turns", [])
-    turns = independent_turns + verifier_turns
-    tools = debug.get("tools", []) + debug.get("verification", {}).get("tools", [])
+    turns = independent_turns + adversarial_turns + verifier_turns
+    tools = (debug.get("tools", []) + debug.get("adversarial", {}).get("tools", [])
+             + debug.get("verification", {}).get("tools", []))
     audits = debug.get("audits", [])
     calls = [(turn, MODEL_RATES.get(models["independent"]))
              for turn in independent_turns]
+    calls += [(turn, MODEL_RATES.get(models["adversarial"]))
+              for turn in adversarial_turns]
     calls += [(turn, MODEL_RATES.get(models["verifier"]))
               for turn in verifier_turns]
     calls += [(audit, MODEL_RATES.get(audit.get("model", models[audit["name"]])))
@@ -918,6 +932,7 @@ def review_trace(debug):
              "instructions": debug.get("instructions", prompt),
              "input": "PR text, patch, and commits omitted from public debug output",
              "turns": debug.get("turns", []), "tools": debug.get("tools", []),
+             "adversarial": debug.get("adversarial", {}),
              "audits": debug.get("audits", []),
              "verification": debug.get("verification", {}),
              "collator": debug.get("collator")}
@@ -928,7 +943,8 @@ def review_trace(debug):
         trace["skip"] = debug["skip"]
     if debug.get("pipeline_stage"):
         trace["pipeline_stage"] = debug["pipeline_stage"]
-    for key in ("independent_review_sha256", "verification_output_sha256"):
+    for key in ("independent_review_sha256", "adversarial_review_sha256",
+                "verification_output_sha256"):
         if key in debug:
             trace[key] = debug[key]
     if metrics["estimated_cost_usd"] is not None:
