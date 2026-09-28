@@ -117,13 +117,36 @@ class BotTests(unittest.TestCase):
             server.server_close()
             thread.join()
 
+    def test_wrong_path_log_redacts_query_and_identifies_non_webhook(self):
+        jobs = Queue()
+        server = ThreadingHTTPServer(("127.0.0.1", 0), bot.make_handler(b"secret", jobs))
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        try:
+            body = b"{}"
+            url = f"http://127.0.0.1:{server.server_port}/?api_key=do-not-log"
+            request = urllib.request.Request(url, body, headers={"X-Next-Action": "probe"})
+            with self.assertLogs(level="WARNING") as logs:
+                with self.assertRaises(urllib.error.HTTPError) as error:
+                    urllib.request.urlopen(request)
+            self.assertEqual(error.exception.code, 404)
+            output = "\n".join(logs.output)
+            self.assertIn("reason=unexpected_path path=/", output)
+            self.assertIn("signature_present=False", output)
+            self.assertNotIn("do-not-log", output)
+            self.assertTrue(jobs.empty())
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
     def test_browser_gets_do_not_log_info(self):
         jobs = Queue()
         server = ThreadingHTTPServer(("127.0.0.1", 0), bot.make_handler(b"secret", jobs))
         thread = threading.Thread(target=server.serve_forever)
         thread.start()
         try:
-            url = f"http://127.0.0.1:{server.server_port}/"
+            url = f"http://127.0.0.1:{server.server_port}/?api_key=do-not-log"
             with patch.object(bot.logging, "info") as info, \
                     patch.object(bot.logging, "debug") as debug:
                 with self.assertRaises(urllib.error.HTTPError) as error:
@@ -131,6 +154,7 @@ class BotTests(unittest.TestCase):
             self.assertEqual(error.exception.code, 501)
             info.assert_not_called()
             self.assertTrue(debug.called)
+            self.assertNotIn("do-not-log", str(debug.call_args))
         finally:
             server.shutdown()
             server.server_close()

@@ -1053,7 +1053,17 @@ def worker(jobs, state_dir, api_key, forgejo_token, bot_login):
 def make_handler(secret, jobs):
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):
-            if self.path != "/webhooks/forgejo":
+            request_path = urllib.parse.urlsplit(self.path).path
+            if request_path != "/webhooks/forgejo":
+                def safe(value):
+                    return "".join(char for char in value if char.isprintable())[:200] or "-"
+
+                logging.warning(
+                    "webhook rejected reason=unexpected_path path=%s host=%s event=%s signature_present=%s",
+                    safe(request_path), safe(self.headers.get("Host", "")),
+                    safe(self.headers.get("X-Forgejo-Event", "")),
+                    bool(self.headers.get("X-Forgejo-Signature")),
+                )
                 self.send_error(404)
                 return
             size = self.headers.get("Content-Length", "")
@@ -1079,7 +1089,8 @@ def make_handler(secret, jobs):
 
         def log_message(self, format, *args):
             log = logging.debug if self.command == "GET" else logging.info
-            log("Webhook request: %s", format % args)
+            message = (format % args).replace(self.path, urllib.parse.urlsplit(self.path).path)
+            log("Webhook request: %s", message)
 
     return Handler
 
