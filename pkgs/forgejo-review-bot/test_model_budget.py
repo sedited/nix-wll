@@ -122,6 +122,35 @@ class ModelBudgetTests(unittest.TestCase):
         self.assertEqual(budget.events, [])
         send.assert_not_called()
 
+    def test_inspection_limit_returns_final_answer_and_records_skipped_calls(self):
+        calls = [{"type": "function_call", "call_id": f"call-{i}",
+                  "name": "read_file", "arguments": '{"path":"src/a.cpp","start_line":1}'}
+                 for i in range(3)]
+        raw = '{"coverage":{"status":"partial","limitations":["Caller not inspected"]}}'
+        results = [
+            {"id": "tools", "status": "completed", "output": calls},
+            {"id": "final", "status": "completed", "output": [
+                {"type": "message", "content": [{"type": "output_text", "text": raw}]}]},
+        ]
+        debug = {}
+        budget = FakeBudget()
+        with patch.object(model.urllib.request, "urlopen",
+                          side_effect=[Response(item) for item in results]) as send, \
+                patch.object(model, "read_file", return_value="1: evidence") as read:
+            answer = model.openai_review(
+                "secret", "patch", self.snapshot, SimpleNamespace(), self.prompt_config,
+                debug, max_tool_calls=2, budget=budget)
+        self.assertEqual(answer, raw)
+        self.assertEqual(read.call_count, 2)
+        final_request = json.loads(send.call_args_list[-1].args[0].data)
+        self.assertEqual(final_request["tool_choice"], "none")
+        self.assertIn("Inspection limit reached", final_request["input"][-1]["output"])
+        self.assertEqual(debug["max_tool_calls"], 2)
+        self.assertEqual(debug["tools"][-1]["skipped"], "inspection_limit")
+        self.assertNotIn("skipped", debug["tools"][0])
+        self.assertEqual([event[0] for event in budget.events],
+                         ["reserve", "settle", "reserve", "settle"])
+
     def test_stale_review_between_turns_does_not_reserve_again(self):
         call = {"type": "function_call", "call_id": "call-1",
                 "name": "read_file", "arguments": '{"path":"src/a.cpp","start_line":1}'}

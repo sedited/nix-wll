@@ -12,7 +12,6 @@ from .repository import (find_paths, read_file, read_diff, search_code, blame_ba
 from .spend import BudgetExceeded
 
 MAX_TOOL_CALLS = 24
-MAX_FOCUSED_TOOL_CALLS = 6
 MAX_MODEL_TURNS = 10
 MAX_OUTPUT_TOKENS = 6_000
 MAX_VERIFIER_OUTPUT_TOKENS = 8_000
@@ -259,7 +258,7 @@ def openai_review(api_key, review, snapshot, bot_config, prompt_config, debug=No
         debug.update({"instructions": prompt,
                       "review_input_bytes": len(review_bytes),
                       "review_input_sha256": hashlib.sha256(review_bytes).hexdigest(),
-                      "turns": [], "tools": []})
+                      "turns": [], "tools": [], "max_tool_calls": max_tool_calls})
         stage_debug = _stage_record(debug, stage_name, model)
     else:
         stage_debug = None
@@ -320,7 +319,8 @@ def openai_review(api_key, review, snapshot, bot_config, prompt_config, debug=No
         if calls:
             inputs.extend(output)
             for call in calls:
-                if calls_used >= max_tool_calls:
+                skipped = calls_used >= max_tool_calls
+                if skipped:
                     answer = "Inspection limit reached. Finish with evidence already available."
                 else:
                     calls_used += 1
@@ -376,13 +376,16 @@ def openai_review(api_key, review, snapshot, bot_config, prompt_config, debug=No
                                "call_id": call["call_id"], "output": answer})
                 if debug is not None:
                     arguments = str(call.get("arguments", ""))
-                    debug["tools"].append({
+                    tool_record = {
                         "name": str(call.get("name", ""))[:100],
                         "arguments": arguments[:160],
                         "arguments_sha256": hashlib.sha256(arguments.encode()).hexdigest(),
                         "output_bytes": len(answer.encode()),
                         "output_sha256": hashlib.sha256(answer.encode()).hexdigest(),
-                    })
+                    }
+                    if skipped:
+                        tool_record["skipped"] = "inspection_limit"
+                    debug["tools"].append(tool_record)
             continue
         text = output_text(output)
         if stage_debug is not None:
