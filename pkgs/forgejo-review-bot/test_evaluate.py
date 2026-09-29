@@ -54,7 +54,7 @@ class EvaluateTests(unittest.TestCase):
             return "b" * 40, "a" * 40, "review input", None
 
         def review(api_key, review_input, checkout, debug,
-                   prompt=None, model=None):
+                   prompt=None, model=None, stage="independent"):
             self.assertEqual(api_key, "openai-key")
             self.assertEqual(checkout, Path("/state/checkout"))
             if prompt is None:

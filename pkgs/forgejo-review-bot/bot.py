@@ -223,7 +223,7 @@ def run_audit(api_key, name, prompt, review, notes=""):
                            if name == "developer_notes" else "")
     with tempfile.TemporaryDirectory() as directory:
         answer, turn, _tools = codex_review(api_key, model, prompt, input_text,
-                                            Path(directory))
+                                            Path(directory), stage=name)
     record = {"name": name, "model": model, "status": "completed", **turn,
               "output_truncated": len(answer.encode()) > output_bytes}
     clipped = answer.encode()[:output_bytes].decode(errors="replace")
@@ -232,7 +232,7 @@ def run_audit(api_key, name, prompt, review, notes=""):
     return clipped, record
 
 
-def codex_review(api_key, model, prompt, review, checkout):
+def codex_review(api_key, model, prompt, review, checkout, stage="independent"):
     """Run one isolated Codex session and require a completed final answer."""
     command = ["codex", "exec", "--json", "--ephemeral",
                "--dangerously-bypass-approvals-and-sandbox",
@@ -243,13 +243,20 @@ def codex_review(api_key, model, prompt, review, checkout):
                "-c", 'shell_environment_policy.filters.CODEX_API_KEY="exclude"',
                "-c", "developer_instructions=" + json.dumps(prompt, ensure_ascii=False),
                "-"]
+    logging.info("codex stage start stage=%s model=%s", stage, model)
     started = time.monotonic()
     with tempfile.TemporaryDirectory() as codex_home:
         env = dict(os.environ, CODEX_API_KEY=api_key, CODEX_HOME=codex_home)
         env.pop("OPENAI_API_KEY", None)
-        result = subprocess.run(command, input=review, capture_output=True,
-                                text=True, env=env, timeout=1800)
+        try:
+            result = subprocess.run(command, input=review, capture_output=True,
+                                    text=True, env=env, timeout=1800)
+        except subprocess.TimeoutExpired:
+            logging.error("codex stage timeout stage=%s model=%s", stage, model)
+            raise
     if result.returncode:
+        logging.error("codex stage exit stage=%s model=%s status=%d",
+                      stage, model, result.returncode)
         raise ValueError(f"Codex exited with status {result.returncode}")
     answer = None
     usage = None
@@ -263,15 +270,23 @@ def codex_review(api_key, model, prompt, review, checkout):
             if item.get("type") == "agent_message":
                 answer = item.get("text")
             elif item.get("type") in {"command_execution", "web_search", "mcp_tool_call"}:
-                tool_events.append({"name": item["type"],
-                                    "status": item.get("status")})
+                status = item.get("status")
+                tool_events.append({"name": item["type"], "status": status})
+                logging.log(logging.WARNING if status == "failed" else logging.INFO,
+                            "codex tool stage=%s name=%s status=%s exit_code=%s",
+                            stage, item["type"], status, item.get("exit_code"))
         elif kind == "turn.completed":
             completed = True
             usage = event.get("usage") or {}
         elif kind in {"turn.failed", "error"}:
+            logging.error("codex stage event stage=%s model=%s type=%s",
+                          stage, model, kind)
             raise ValueError("Codex review failed")
     if not completed or not isinstance(answer, str) or not answer.strip():
+        logging.error("codex stage incomplete stage=%s model=%s", stage, model)
         raise ValueError("Codex review did not complete with text")
+    logging.info("codex stage complete stage=%s model=%s elapsed_seconds=%.2f tool_calls=%d",
+                 stage, model, time.monotonic() - started, len(tool_events))
     details = usage.get("input_tokens_details") or {}
     turn = {"status": "completed", "request_bytes": len(review.encode()),
             "request_sha256": hashlib.sha256(review.encode()).hexdigest(),
@@ -315,7 +330,7 @@ def focused_review_input(review, checkout, name):
 def run_focused_review(api_key, name, prompt, review, checkout):
     stage_debug = {}
     answer = codex_stage_review(api_key, review, checkout, stage_debug,
-                                prompt=prompt, model=stage_models()[name])
+                                prompt=prompt, model=stage_models()[name], stage=name)
     turns = stage_debug["turns"]
     record = {"name": name, "model": stage_models()[name], "status": "completed",
               "input_tokens": sum(turn.get("input_tokens") or 0 for turn in turns),
@@ -367,10 +382,12 @@ def run_audits(api_key, review, checkout, debug):
     return "Focused Luna reviews:\n" + "\n\n".join(results)
 
 
-def codex_stage_review(api_key, review, checkout, debug=None, prompt=None, model=None):
+def codex_stage_review(api_key, review, checkout, debug=None, prompt=None,
+                       model=None, stage="independent"):
     prompt = instructions() if prompt is None else prompt
     model = stage_models()["independent"] if model is None else model
-    answer, turn, tool_events = codex_review(api_key, model, prompt, review, checkout)
+    answer, turn, tool_events = codex_review(api_key, model, prompt, review,
+                                             checkout, stage=stage)
     if debug is not None:
         review_bytes = review.encode()
         debug.update({"instructions": prompt,
@@ -391,7 +408,8 @@ def review_with_independent_passes(api_key, review, checkout, debug):
                                  sol_debug)
         adversarial_future = pool.submit(
             codex_stage_review, api_key, review, checkout, adversarial_debug,
-            prompt=audit_prompts()["adversarial"], model=stage_models()["adversarial"])
+            prompt=audit_prompts()["adversarial"], model=stage_models()["adversarial"],
+            stage="adversarial")
         sol_review = sol_future.result()
         adversarial_review = adversarial_future.result()
         luna_reviews = audits_future.result()
@@ -411,7 +429,8 @@ def review_with_independent_passes(api_key, review, checkout, debug):
     verified = codex_stage_review(
         api_key, review + "\n\nIndependent candidate reviews:\n" + reviews,
         checkout, verification_debug,
-        prompt=audit_prompts()["verifier"], model=stage_models()["verifier"])
+        prompt=audit_prompts()["verifier"], model=stage_models()["verifier"],
+        stage="verifier")
     stage_outputs["verifier"] = verified
     debug["verification_output_sha256"] = hashlib.sha256(verified.encode()).hexdigest()
 

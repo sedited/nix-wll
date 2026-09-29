@@ -289,6 +289,29 @@ class BotTests(unittest.TestCase):
         self.assertEqual(turn["reasoning_tokens"], 5)
         self.assertEqual(len(tools), 1)
 
+    def test_codex_logs_failed_tools_without_command_output(self):
+        events = [
+            {"type": "item.completed", "item": {"type": "command_execution",
+                "status": "failed", "exit_code": 1, "command": "secret command",
+                "aggregated_output": "secret output"}},
+            {"type": "item.completed", "item": {"type": "agent_message",
+                "text": "Review incomplete."}},
+            {"type": "turn.completed", "usage": {}},
+        ]
+        result = subprocess.CompletedProcess([], 0,
+            "\n".join(json.dumps(event) for event in events), "")
+        with patch.object(bot.subprocess, "run", return_value=result), \
+                self.assertLogs(level="INFO") as logs:
+            bot.codex_review("key", "gpt-6-luna", "prompt", "patch",
+                             Path("/checkout"), stage="verifier")
+        entries = "\n".join(logs.output)
+        self.assertIn("codex stage start stage=verifier", entries)
+        self.assertIn("codex tool stage=verifier name=command_execution status=failed exit_code=1",
+                      entries)
+        self.assertIn("codex stage complete stage=verifier", entries)
+        self.assertNotIn("secret command", entries)
+        self.assertNotIn("secret output", entries)
+
     def test_codex_requires_completed_nonempty_output(self):
         for events, code in [([{"type": "item.completed", "item":
                 {"type": "agent_message", "text": "partial"}}], 0),
@@ -492,7 +515,8 @@ class BotTests(unittest.TestCase):
             return "Focused Luna reviews:\n" + "\n".join(
                 f"{name}:\n{name} finding" for name in bot.AUDIT_NAMES)
 
-        def model(api_key, review, checkout, debug, prompt=None, model=None):
+        def model(api_key, review, checkout, debug, prompt=None, model=None,
+                  stage="independent"):
             calls.append(("sol", review, prompt, model))
             if prompt is None:
                 self.assertEqual(review, "Original PR input")
