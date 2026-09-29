@@ -117,6 +117,11 @@ in
       description = "Directory containing the bot checkout state.";
     };
 
+    codexPackage = lib.mkOption {
+      type = lib.types.package;
+      description = "Codex CLI package used to run review stages.";
+    };
+
     openaiKeyFile = lib.mkOption {
       type = lib.types.str;
       description = "Path to a file containing the OpenAI API key.";
@@ -168,6 +173,7 @@ in
 
     systemd.services.forgejo-review-bot = {
       description = "Forgejo pull request review bot";
+      path = [ cfg.codexPackage pkgs.ripgrep ];
       wantedBy = [ "multi-user.target" ];
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
@@ -193,7 +199,7 @@ in
         ProtectKernelModules = true;
         ProtectControlGroups = true;
         RestrictSUIDSGID = true;
-        RestrictNamespaces = true;
+        RestrictNamespaces = "user mnt pid net";
         LockPersonality = true;
         MemoryDenyWriteExecute = true;
         RestrictRealtime = true;
