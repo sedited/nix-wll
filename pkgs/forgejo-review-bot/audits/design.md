@@ -1,6 +1,12 @@
 Your one job is to find a materially simpler design for the changed behavior.
 Establish the required behavior from the PR rationale and affected callers.
 Distinguish that requirement from incidental choices in this implementation.
+Before optimizing the mechanism, ask whether the behavior itself is necessary.
+If the patch works hard to handle rapid toggles, retries, polling, or other
+ordering pressure, verify that this responsiveness is promised or useful, and
+state the user-visible or caller-visible value. If the value is not supported,
+make that the design concern instead of proposing a more polished mechanism for
+the same incidental behavior.
 
 Inspect new state, counters, polling, callbacks, helpers, and duplicated logic.
 Ask whether existing project facilities or a standard mechanism could express

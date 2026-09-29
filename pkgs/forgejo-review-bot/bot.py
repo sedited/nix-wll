@@ -7,6 +7,7 @@ import hmac
 import html
 import json
 import logging
+import os
 import queue
 import re
 import subprocess
@@ -34,8 +35,12 @@ MAX_FOCUSED_TOOL_CALLS = 6
 MAX_FOCUSED_DIFF_BYTES = 80_000
 MAX_MODEL_TURNS = 10
 MAX_OUTPUT_TOKENS = 6_000
+MAX_VERIFIER_OUTPUT_TOKENS = 8_000
 MAX_AUDIT_OUTPUT_TOKENS = 4_000
 MAX_AUDIT_OUTPUT_BYTES = 4_000
+MAX_COLLATOR_OUTPUT_TOKENS = 6_000
+MAX_COLLATOR_OUTPUT_BYTES = 10_000
+MAX_PUBLIC_STAGE_OUTPUT_BYTES = 4_000
 MAX_AUDIT_DOC_BYTES = 100_000
 MAX_DISCUSSION_RESPONSE_BYTES = 500_000
 MAX_CONTEXT_CALLS = 4
@@ -461,13 +466,17 @@ def audit_developer_notes(checkout):
 
 def run_audit(api_key, name, prompt, review, notes=""):
     model = stage_models()[name]
+    output_tokens = (MAX_COLLATOR_OUTPUT_TOKENS if name == "collator"
+                     else MAX_AUDIT_OUTPUT_TOKENS)
+    output_bytes = (MAX_COLLATOR_OUTPUT_BYTES if name == "collator"
+                    else MAX_AUDIT_OUTPUT_BYTES)
     input_text = review + ("\n\nMerge-base doc/developer-notes.md:\n" + notes
                            if name == "developer_notes" else "")
     payload = json.dumps({"model": model, "store": False,
                           "reasoning": {"effort": "low"},
                           "instructions": prompt, "input": [
                               {"role": "user", "content": input_text}],
-                          "max_output_tokens": MAX_AUDIT_OUTPUT_TOKENS}).encode()
+                          "max_output_tokens": output_tokens}).encode()
     request = urllib.request.Request(
         "https://api.openai.com/v1/responses", data=payload,
         headers={"Authorization": f"Bearer {api_key}",
@@ -496,13 +505,13 @@ def run_audit(api_key, name, prompt, review, notes=""):
               "output_tokens": usage.get("output_tokens"),
               "reasoning_tokens": (usage.get("output_tokens_details") or {}).get(
                   "reasoning_tokens"),
-              "output_truncated": len(answer.encode()) > MAX_AUDIT_OUTPUT_BYTES}
+              "output_truncated": len(answer.encode()) > output_bytes}
     if status != "completed" or not answer.strip():
         if status == "completed":
             record["status"] = "empty"
         return "Audit unavailable.", record
-    clipped = answer.encode()[:MAX_AUDIT_OUTPUT_BYTES].decode(errors="replace")
-    if len(answer.encode()) > MAX_AUDIT_OUTPUT_BYTES:
+    clipped = answer.encode()[:output_bytes].decode(errors="replace")
+    if len(answer.encode()) > output_bytes:
         clipped += "\n[Audit output truncated]"
     return clipped, record
 
@@ -571,6 +580,7 @@ def run_audits(api_key, review, checkout, debug):
                                             prompt, input_text, notes)
         results = []
         records = []
+        stage_outputs = {}
         for name, future in futures.items():
             try:
                 answer, record = future.result()
@@ -582,13 +592,16 @@ def run_audits(api_key, review, checkout, debug):
                     record["http_status"] = exc.code
             records.append(record)
             results.append(f"{name}:\n{answer}")
+            stage_outputs[name] = answer
     debug["audits"] = records
+    debug["stage_outputs"] = stage_outputs
     return "Focused Luna reviews:\n" + "\n\n".join(results)
 
 
 def openai_review(api_key, review, checkout, debug=None, current_pr=None,
                   prompt=None, model=None, tools=None,
-                  max_tool_calls=MAX_TOOL_CALLS, first_tool_required=True):
+                  max_tool_calls=MAX_TOOL_CALLS, first_tool_required=True,
+                  max_output_tokens=MAX_OUTPUT_TOKENS):
     prompt = instructions() if prompt is None else prompt
     model = stage_models()["independent"] if model is None else model
     tools = TOOLS if tools is None else tools
@@ -614,7 +627,7 @@ def openai_review(api_key, review, checkout, debug=None, current_pr=None,
         payload = json.dumps({"model": model, "store": False,
                               "instructions": prompt, "input": inputs,
                               "tools": tools, "tool_choice": tool_choice,
-                              "max_output_tokens": MAX_OUTPUT_TOKENS}).encode()
+                              "max_output_tokens": max_output_tokens}).encode()
         request = urllib.request.Request(
             "https://api.openai.com/v1/responses",
             data=payload,
@@ -756,6 +769,9 @@ def review_with_independent_passes(api_key, review, checkout, current_pr, debug)
         adversarial_review = adversarial_future.result()
         luna_reviews = audits_future.result()
     debug.update(sol_debug)
+    stage_outputs = debug.setdefault("stage_outputs", {})
+    stage_outputs["independent"] = sol_review
+    stage_outputs["adversarial"] = adversarial_review
     debug["independent_review_sha256"] = hashlib.sha256(sol_review.encode()).hexdigest()
     debug["adversarial_review_sha256"] = hashlib.sha256(
         adversarial_review.encode()).hexdigest()
@@ -768,12 +784,15 @@ def review_with_independent_passes(api_key, review, checkout, current_pr, debug)
     verified = openai_review(
         api_key, review + "\n\nIndependent candidate reviews:\n" + reviews,
         checkout, verification_debug, current_pr,
-        prompt=audit_prompts()["verifier"], model=stage_models()["verifier"])
+        prompt=audit_prompts()["verifier"], model=stage_models()["verifier"],
+        max_output_tokens=MAX_VERIFIER_OUTPUT_TOKENS)
+    stage_outputs["verifier"] = verified
     debug["verification_output_sha256"] = hashlib.sha256(verified.encode()).hexdigest()
 
     debug["pipeline_stage"] = "collation"
     content, record = run_audit(api_key, "collator", audit_prompts()["collator"],
                                 reviews + "\n\nVerification decisions:\n" + verified)
+    stage_outputs["collator"] = content
     debug["collator"] = record
     if record["status"] != "completed" or record["output_truncated"]:
         raise ValueError("Luna collator did not return a complete comment")
@@ -991,6 +1010,8 @@ def review_trace(debug):
     metrics = review_metrics(debug)
     trace = {"models": stage_models(), "endpoint": "/v1/responses", "store": False,
              "max_output_tokens": MAX_OUTPUT_TOKENS,
+             "verifier_max_output_tokens": MAX_VERIFIER_OUTPUT_TOKENS,
+             "collator_max_output_tokens": MAX_COLLATOR_OUTPUT_TOKENS,
              "instructions": debug.get("instructions", prompt),
              "input": "PR text, patch, and commits omitted from public debug output",
              "turns": debug.get("turns", []), "tools": debug.get("tools", []),
@@ -998,6 +1019,17 @@ def review_trace(debug):
              "audits": debug.get("audits", []),
              "verification": debug.get("verification", {}),
              "collator": debug.get("collator")}
+    if debug.get("stage_outputs"):
+        trace["stage_outputs"] = {
+            name: {"text": output.encode()[:MAX_PUBLIC_STAGE_OUTPUT_BYTES]
+                   .decode(errors="replace"),
+                   "truncated": len(output.encode()) > MAX_PUBLIC_STAGE_OUTPUT_BYTES}
+            for name, output in debug["stage_outputs"].items()
+        }
+        trace["stage_outputs_note"] = (
+            "Preliminary agent responses are unverified; only the review above "
+            "is intended as a public finding. Full responses are retained in "
+            "the bot's private state when trace storage succeeds.")
     if "review_input_bytes" in debug:
         trace["review_input_bytes"] = debug["review_input_bytes"]
         trace["review_input_sha256"] = debug["review_input_sha256"]
@@ -1024,6 +1056,20 @@ def debug_section(debug):
     trace = review_trace(debug)
     rendered = html.escape(json.dumps(trace, indent=2, ensure_ascii=True))
     return f"\n<details><summary>Review debug</summary>\n\n<pre>{rendered}</pre>\n</details>\n"
+
+
+def save_review_trace(state_dir, number, head_sha, content, debug):
+    trace_dir = state_dir / "review-traces"
+    trace_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path = trace_dir / f"{number}-{head_sha}-{time.time_ns()}.json"
+    record = {"pr": number, "head": head_sha, "review": content,
+              "stage_outputs": debug.get("stage_outputs", {}),
+              "trace": review_trace(debug)}
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as file:
+        json.dump(record, file, ensure_ascii=False, indent=2)
+        file.write("\n")
+    return path
 
 
 def review_body(base_sha, head_sha, content, debug=None):
@@ -1111,6 +1157,12 @@ def worker(jobs, state_dir, api_key, forgejo_token, bot_login):
             stage = "model"
             content = f"Skipped: {skip}" if skip else review_with_independent_passes(
                 api_key, review, checkout, number, debug)
+            if not skip:
+                try:
+                    save_review_trace(state_dir, number, head_sha, content, debug)
+                except OSError as exc:
+                    logging.warning("Could not save private review trace for PR %d: %s",
+                                    number, type(exc).__name__)
             stage = "publish"
             result = publish_review(forgejo_token, number, bot_login,
                                     base_sha, head_sha, content, debug)

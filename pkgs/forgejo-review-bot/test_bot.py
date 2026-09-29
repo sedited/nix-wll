@@ -458,6 +458,25 @@ class BotTests(unittest.TestCase):
         self.assertEqual(record["name"], "public_contract")
         self.assertEqual(record["input_tokens"], 100)
 
+    def test_collator_has_room_for_a_concise_final_review(self):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+            def read(self, *args):
+                return json.dumps({"status": "completed", "output": [{"type": "message",
+                    "content": [{"type": "output_text", "text": "A" * 5000}]}]}).encode()
+
+        with patch.object(bot.urllib.request, "urlopen", return_value=Response()) as send:
+            answer, record = bot.run_audit("key", "collator", "Edit review", "Leads")
+        payload = json.loads(send.call_args.args[0].data)
+        self.assertEqual(payload["max_output_tokens"], bot.MAX_COLLATOR_OUTPUT_TOKENS)
+        self.assertEqual(len(answer), 5000)
+        self.assertFalse(record["output_truncated"])
+
     def test_tooled_audit_has_only_repository_reads_and_optional_first_call(self):
         class Response:
             def __enter__(self):
@@ -628,7 +647,8 @@ class BotTests(unittest.TestCase):
                             "cache_write_tokens": 10, "output_tokens": 5,
                             "elapsed_seconds": 1.25}],
                  "tools": [{"name": "search_code", "arguments": "</details> ```",
-                            "output_bytes": 19, "output_sha256": "a" * 64}]}
+                            "output_bytes": 19, "output_sha256": "a" * 64}],
+                 "stage_outputs": {"tests": "</pre><script>alert(1)</script>"}}
         body = bot.review_body("b" * 40, "a" * 40, "Review text.", debug)
         metrics = bot.review_metrics(debug)
         trace = bot.review_trace(debug)
@@ -642,6 +662,22 @@ class BotTests(unittest.TestCase):
         self.assertIn("&lt;/details&gt;", body)
         self.assertNotIn("<script>", body)
         self.assertEqual(body.count("</details>"), 1)
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", body)
+
+    def test_private_review_trace_keeps_full_stage_responses(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state_dir = Path(directory)
+            output = "A" * (bot.MAX_PUBLIC_STAGE_OUTPUT_BYTES + 100)
+            debug = {"stage_outputs": {"tests": output, "verifier": "DROP weak claim"}}
+            path = bot.save_review_trace(state_dir, 34486, "a" * 40, "Public comment", debug)
+            saved = json.loads(path.read_text())
+            self.assertEqual(saved["stage_outputs"]["tests"], output)
+            self.assertEqual(saved["review"], "Public comment")
+            self.assertTrue(saved["trace"]["stage_outputs"]["tests"]["truncated"])
+            self.assertLessEqual(len(saved["trace"]["stage_outputs"]["tests"]["text"].encode()),
+                                 bot.MAX_PUBLIC_STAGE_OUTPUT_BYTES)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
 
     def test_review_cost_includes_luna_audits(self):
         debug = {"turns": [{"input_tokens": 100, "cached_tokens": 20,
@@ -769,7 +805,7 @@ class BotTests(unittest.TestCase):
                 f"{name}:\n{name} finding" for name in bot.AUDIT_NAMES)
 
         def model(api_key, review, checkout, debug, current_pr, prompt=None,
-                  model=None):
+                  model=None, max_output_tokens=None):
             calls.append(("sol", review, prompt, model))
             if prompt is None:
                 self.assertEqual(review, "Original PR input")
@@ -783,6 +819,7 @@ class BotTests(unittest.TestCase):
                 return "Adversarial finding"
             self.assertEqual(prompt, bot.audit_prompts()["verifier"])
             self.assertEqual(model, "gpt-6-luna")
+            self.assertEqual(max_output_tokens, bot.MAX_VERIFIER_OUTPUT_TOKENS)
             for candidate in candidates:
                 self.assertIn(candidate, review)
             self.assertIn("Original PR input", review)
@@ -816,6 +853,9 @@ class BotTests(unittest.TestCase):
                          hashlib.sha256(b"Adversarial finding").hexdigest())
         self.assertIn("verification_output_sha256", debug)
         self.assertIn("adversarial", bot.review_trace(debug))
+        self.assertEqual(debug["stage_outputs"]["independent"], "Independent finding")
+        self.assertEqual(debug["stage_outputs"]["verifier"],
+                         "ACCEPT Independent finding; ACCEPT Adversarial finding")
 
     def test_incomplete_collation_prevents_publication(self):
         debug = {}

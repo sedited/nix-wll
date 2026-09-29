@@ -8,5 +8,8 @@ Return `No candidate finding.` or at most two concise candidate findings. For
 each, name a file and changed location, a concrete scenario, its consequence,
 and the evidence or uncertainty. For a design or test-quality suggestion, name
 the current cost or limitation, the concrete alternative, and why the required
-behavior is preserved. Do not summarize the patch, praise it, or fill a
-checklist with non-findings.
+behavior is preserved. First check that the behavior being protected is real:
+tie it to the PR rationale, public behavior, affected callers, or a regression
+the test would catch. Do not promote an incidental stress case or mechanism to
+a requirement without that support. Do not summarize the patch, praise it, or
+fill a checklist with non-findings.

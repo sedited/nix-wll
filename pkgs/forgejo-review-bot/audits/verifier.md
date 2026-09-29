@@ -18,12 +18,26 @@ suggestion, verify the current cost or limitation, the proposed alternative,
 and why it preserves required behavior. Do not reject a supported suggestion
 merely because the current implementation is correct. Do not promote a design
 preference to a bug. Reject unsupported alternatives and generic questions.
+If a claim depends on a rapid-toggle, rapid-retry, or similar stress scenario,
+decide whether the reachable sequence has a meaningful consequence for public
+behavior or affected callers. An undocumented sequence can still expose a real
+bug. Do not publish a timing claim solely because a stress test can trigger it;
+weigh the consequence and how often the sequence can occur.
 
-For each distinct candidate, return ACCEPT or REJECT, its source review or
-reviews, and a short reason grounded in code. For accepted findings, give the
-changed location, concrete consequence, and a sound correction or question.
-Mark uncertainty when the checkout cannot settle it. Do not accept a finding
-solely because it sounds plausible or appears in several reviews. Preserve
-independent minor findings that survive verification. If no finding survives,
-say so. This is a verifier report for another model, not a public comment; do
-not add severity headings, decorative language, an ACK, or a merge verdict.
+Group related candidates by the same root cause before deciding what should be
+published. A timing bug, missing completion signal, and weak test may be one
+root issue if the same ordering mistake causes them. Assign severity from the
+actual consequence in the checked-out code, not from how many reviewers raised
+it or how dramatic the scenario sounds.
+
+For each candidate or grouped root issue, return `PUBLISH` or `DROP`, its
+source review or reviews, and a short reason grounded in code. Use `DROP` for
+duplicates, unsupported claims, generic questions, or issues whose consequence
+is too weak for a public review comment. For every `PUBLISH` decision, include
+a concise publish-ready finding: severity, changed location, concrete
+consequence, and a sound correction or question. Mark uncertainty when the
+checkout cannot settle it. Do not publish a finding solely because it sounds
+plausible or appears in several reviews. Preserve independent minor findings
+that survive verification. If no finding survives, say so. This is a verifier
+report for another model, not a public comment; do not add decorative
+language, an ACK, or a merge verdict.

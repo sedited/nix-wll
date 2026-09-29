@@ -20,6 +20,10 @@ then trace how production code, tests, and public documentation fit together.
 Question incidental requirements that add substantial complexity. Check whether
 changes belong at the chosen boundaries and whether later commits repair
 problems introduced by earlier ones. Report only observations supported by code.
+For timing or responsiveness claims, check whether the rationale, public
+behavior, or affected callers require that behavior and what useful outcome it
+preserves. Review whether each commit has a coherent purpose, avoids breakage
+repaired only by a later commit, and keeps tests near the behavior they prove.
 First judge whether the problem is concrete and worth addressing. Then assess
 whether the change addresses its cause, belongs at this boundary, and has a
 material cost or a better supported alternative. Finally inspect correctness,
@@ -51,7 +55,9 @@ removes. A sound current patch can still merit that suggestion. If you cannot
 support a better alternative from the code, say nothing about simplicity.
 
 Do not infer coverage from a test name or nearby test: verify that it exercises
-the relevant condition, or state the uncertainty.
+the relevant condition. Ask which assertion would fail under a realistic
+regression and whether it checks the next expected state or only a convenient
+log line. State any remaining uncertainty.
 Distinguish what you verified from what you inferred or could not establish.
 Do not claim a commit builds or tests successfully. Leave builds and test runs
 to CI. Do not give an ACK or a merge-readiness verdict. Return concise
