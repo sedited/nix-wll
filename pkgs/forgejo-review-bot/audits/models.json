@@ -1,5 +1,5 @@
 {
-  "adversarial": "gpt-6-sol",
+  "adversarial": "gpt-6.1-sol",
   "collator": "gpt-6-luna",
   "design": "gpt-6-luna",
   "developer_notes": "gpt-6-luna",

@@ -71,7 +71,7 @@ class BotTests(unittest.TestCase):
             for name in ("common", "adversarial", *bot.AUDIT_NAMES,
                          "verifier", "collator"):
                 (audit_dir / f"{name}.md").write_text(f"{name} instructions\n")
-            models = {name: "gpt-6-sol" if name in
+            models = {name: "gpt-6.1-sol" if name in
                       ("independent", "adversarial") else "gpt-6-luna"
                       for name in bot.MODEL_NAMES}
             (audit_dir / "models.json").write_text(json.dumps(models))
@@ -80,7 +80,7 @@ class BotTests(unittest.TestCase):
                 bot.configure_audit_prompts(audit_dir)
                 self.assertEqual(bot.audit_prompts()["adversarial"],
                                  "adversarial instructions")
-                self.assertEqual(bot.stage_models()["adversarial"], "gpt-6-sol")
+                self.assertEqual(bot.stage_models()["adversarial"], "gpt-6.1-sol")
                 self.assertEqual(bot.stage_models()["verifier"], "gpt-6-luna")
                 del models["adversarial"]
                 (audit_dir / "models.json").write_text(json.dumps(models))
@@ -818,7 +818,7 @@ class BotTests(unittest.TestCase):
                 return "Independent finding"
             if prompt == "Adversarial prompt":
                 self.assertEqual(review, "Original PR input")
-                self.assertEqual(model, "gpt-6-sol")
+                self.assertEqual(model, "gpt-6.1-sol")
                 parallel_stage.wait()
                 return "Adversarial finding"
             self.assertEqual(prompt, bot.audit_prompts()["verifier"])

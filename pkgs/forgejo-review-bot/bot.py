@@ -53,7 +53,7 @@ AUDIT_NAMES = ("state", "public_contract", "tests", "developer_notes", "design")
 TOOLED_AUDITS = ("tests", "design")
 MODEL_NAMES = ("independent", "adversarial", *AUDIT_NAMES, "verifier", "collator")
 MODEL_RATES = {"gpt-6-luna": (0.1, 0.01, 0.125, 0.5),
-               "gpt-6-sol": (2, 0.2, 2.5, 10)}
+               "gpt-6.1-sol": (2, 0.1, 2.5, 10)}
 INSTRUCTIONS = None
 AUDIT_PROMPTS = None
 MODELS = None
@@ -1044,7 +1044,7 @@ def review_trace(debug):
     if metrics["estimated_cost_usd"] is not None:
         trace.update(metrics)
         trace["pricing_note"] = ("Estimated from token usage at configured "
-                                 "gpt-6-sol and gpt-6-luna Standard rates. "
+                                 "gpt-6.1-sol and gpt-6-luna Standard rates. "
                                  "Only calls with reported usage are counted; "
                                  "missing cache-write counts are treated as zero.")
     else:

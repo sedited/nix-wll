@@ -26,7 +26,7 @@ class EvaluateTests(unittest.TestCase):
         bot.MODELS = self.models
 
     def test_replay_writes_private_artifact_without_publishing(self):
-        models = {name: "gpt-6-sol" if name in ("independent", "adversarial")
+        models = {name: "gpt-6.1-sol" if name in ("independent", "adversarial")
                   else "gpt-6-luna" for name in bot.MODEL_NAMES}
         prompts = {name: f"{name} prompt" for name in
                    ("common", "adversarial", *bot.AUDIT_NAMES,
@@ -137,13 +137,13 @@ class EvaluateTests(unittest.TestCase):
             for name in ("common", "adversarial", *bot.AUDIT_NAMES,
                          "verifier", "collator"):
                 (audit_dir / f"{name}.md").write_text(f"{name}\n", encoding="utf-8")
-            models = {name: "gpt-6-sol" if name in ("independent", "adversarial")
+            models = {name: "gpt-6.1-sol" if name in ("independent", "adversarial")
                       else "gpt-6-luna" for name in bot.MODEL_NAMES}
             (audit_dir / "models.json").write_text(json.dumps(models), encoding="utf-8")
             output_dir = root / "out"
             models_override = root / "models-override.json"
             override = dict(models)
-            override["verifier"] = "gpt-6-sol"
+            override["verifier"] = "gpt-6.1-sol"
             models_override.write_text(json.dumps(override), encoding="utf-8")
             seen = []
 
@@ -172,7 +172,7 @@ class EvaluateTests(unittest.TestCase):
         self.assertTrue(all(item[0] == "openai-key" for item in seen))
         self.assertTrue(all(item[1] == "forgejo-token" for item in seen))
         self.assertTrue(all(item[2].name == "checkout" for item in seen))
-        self.assertEqual(bot.stage_models()["verifier"], "gpt-6-sol")
+        self.assertEqual(bot.stage_models()["verifier"], "gpt-6.1-sol")
 
 
 if __name__ == "__main__":
