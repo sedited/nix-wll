@@ -273,9 +273,9 @@ def codex_review(api_key, model, prompt, review, checkout, stage="independent"):
             elif item.get("type") in {"command_execution", "web_search", "mcp_tool_call"}:
                 status = item.get("status")
                 tool_events.append({"name": item["type"], "status": status})
-                logging.log(logging.WARNING if status == "failed" else logging.INFO,
-                            "codex tool stage=%s name=%s status=%s exit_code=%s",
-                            stage, item["type"], status, item.get("exit_code"))
+                if status == "failed":
+                    logging.warning("codex tool stage=%s name=%s status=%s exit_code=%s",
+                                    stage, item["type"], status, item.get("exit_code"))
         elif kind == "turn.completed":
             completed = True
             usage = event.get("usage") or {}
@@ -394,10 +394,6 @@ def route_adversarial(api_key, review, checkout, sol_review, debug):
         reason = "audit unavailable"
     elif any(name not in debug.get("stage_outputs", {}) for name in AUDIT_NAMES):
         reason = "audit output unavailable"
-    elif (sol_review.strip() != "No candidate finding."
-          or any(output.strip() != "No candidate finding."
-                 for output in debug["stage_outputs"].values())):
-        reason = "candidate finding"
     else:
         try:
             base = git(checkout, "merge-base", "refs/review-bot/base", "HEAD").strip()
@@ -412,7 +408,11 @@ def route_adversarial(api_key, review, checkout, sol_review, debug):
             else:
                 answer, record = run_audit(
                     api_key, "router", audit_prompts()["router"],
-                    review + "\n\nChanged paths:\n" + "\n".join(paths))
+                    review + "\n\nChanged paths:\n" + "\n".join(paths)
+                    + "\n\nIndependent review:\n" + sol_review
+                    + "\n\nFocused reviews:\n" + "\n\n".join(
+                        f"{name}:\n{debug['stage_outputs'][name]}"
+                        for name in AUDIT_NAMES))
                 debug["router"] = record
                 debug["stage_outputs"]["router"] = answer
                 if answer.strip() != "SKIP":
@@ -457,7 +457,8 @@ def review_with_independent_passes(api_key, review, checkout, debug):
             prompt=audit_prompts()["adversarial"], model=stage_models()["adversarial"],
             stage="adversarial")
     else:
-        adversarial_review = "Skipped: low-risk change with no preliminary findings."
+        adversarial_review = "Skipped: Luna router classified the change as low risk."
+        adversarial_debug.update({"status": "skipped", "reason": "Luna router"})
     debug.update(sol_debug)
     stage_outputs = debug.setdefault("stage_outputs", {})
     stage_outputs["independent"] = sol_review

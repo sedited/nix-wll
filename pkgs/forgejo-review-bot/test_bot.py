@@ -269,9 +269,11 @@ class BotTests(unittest.TestCase):
         ]
         result = subprocess.CompletedProcess([], 0,
             "\n".join(json.dumps(event) for event in events), "")
-        with patch.object(bot.subprocess, "run", return_value=result) as run:
+        with patch.object(bot.subprocess, "run", return_value=result) as run, \
+                patch.object(bot.logging, "warning") as warning:
             answer, turn, tools = bot.codex_review(
                 "secret", "gpt-6-luna", "Review safely", "PR patch", Path("/checkout"))
+        warning.assert_not_called()
         command = run.call_args.args[0]
         self.assertEqual(command[:4], ["codex", "exec", "--json", "--ephemeral"])
         self.assertIn("--dangerously-bypass-approvals-and-sandbox", command)
@@ -586,7 +588,7 @@ class BotTests(unittest.TestCase):
         self.assertEqual(debug["router"]["name"], "router")
         self.assertEqual(bot.review_metrics(debug)["audit_calls"], 6)
 
-    def test_router_runs_for_critical_paths_and_preliminary_findings(self):
+    def test_router_runs_for_critical_paths(self):
         debug = {"audits": [{"status": "completed"} for _ in bot.AUDIT_NAMES],
                  "stage_outputs": {name: "No candidate finding."
                                    for name in bot.AUDIT_NAMES}}
@@ -598,12 +600,20 @@ class BotTests(unittest.TestCase):
                 "No candidate finding.", debug))
         route.assert_not_called()
         self.assertEqual(debug["adversarial_route"]["reason"], "critical code path")
-        debug["stage_outputs"]["state"] = "Possible state bug"
-        with patch.object(bot, "git") as git:
-            self.assertTrue(bot.route_adversarial(
+
+    def test_router_can_skip_editorial_finding_but_sees_all_reviews(self):
+        debug = {"audits": [{"status": "completed"} for _ in bot.AUDIT_NAMES],
+                 "stage_outputs": {name: "No candidate finding."
+                                   for name in bot.AUDIT_NAMES}}
+        debug["stage_outputs"]["developer_notes"] = "Missing release note"
+        with patch.object(bot, "git", side_effect=["b" * 40 + "\n", "doc/README.md\x00"]), \
+                patch.object(bot, "audit_prompts", return_value={"router": "Route"}), \
+                patch.object(bot, "run_audit", return_value=("SKIP", {})) as route:
+            self.assertFalse(bot.route_adversarial(
                 "key", "Patch:\ndoc change", Path("/unused"),
                 "No candidate finding.", debug))
-        git.assert_not_called()
+        self.assertIn("Missing release note", route.call_args.args[3])
+        self.assertEqual(debug["adversarial_route"]["decision"], "skip")
 
     def test_router_fails_closed_on_incomplete_input_or_answer(self):
         debug = {"audits": [{"status": "completed"} for _ in bot.AUDIT_NAMES],
@@ -642,7 +652,7 @@ class BotTests(unittest.TestCase):
             bot.review_with_independent_passes("key", "PR input", Path("/unused"),
                                                debug)
         self.assertEqual(calls, ["independent", "verifier"])
-        self.assertEqual(debug["adversarial"], {})
+        self.assertEqual(debug["adversarial"]["status"], "skipped")
         self.assertIn("Skipped:", debug["stage_outputs"]["adversarial"])
 
     def test_incomplete_collation_prevents_publication(self):
