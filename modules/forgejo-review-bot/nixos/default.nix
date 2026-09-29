@@ -201,7 +201,6 @@ in
         RestrictSUIDSGID = true;
         RestrictNamespaces = "user mnt pid net";
         LockPersonality = true;
-        MemoryDenyWriteExecute = true;
         RestrictRealtime = true;
       };
     };
