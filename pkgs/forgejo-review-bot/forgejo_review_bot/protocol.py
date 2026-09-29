@@ -77,13 +77,16 @@ def _coverage(value):
 
 
 def _location(value, snapshot):
-    if value["side"] not in {"head", "base"}:
+    if not isinstance(value["side"], str) or value["side"] not in {"head", "base"}:
         raise InvalidReview("Invalid location side")
+    path = value["path"]
+    if not isinstance(path, str) or path not in snapshot.changed_paths:
+        raise InvalidReview(f"Finding must identify a changed file: {repr(path)[:120]}")
     files = snapshot.head_files if value["side"] == "head" else snapshot.base_files
-    if (not isinstance(value["path"], str) or value["path"] not in snapshot.changed_paths
-            or value["path"] not in files or type(value["line"]) is not int
-            or value["line"] < 1):
-        raise InvalidReview("Finding must identify a changed file and positive line")
+    if path not in files:
+        raise InvalidReview(f"Finding path is missing on the {value['side']} side: {repr(path)[:120]}")
+    if type(value["line"]) is not int or value["line"] < 1:
+        raise InvalidReview("Finding must identify a positive line")
 
 
 def discovery(text, stage, snapshot):
@@ -112,6 +115,7 @@ def verification(text, candidates, snapshot):
     expected = {candidate["id"] for candidate in candidates}
     seen = set()
     accepted = []
+    validation_errors = []
     for decision in result["decisions"]:
         _object(decision, VERIFIER_SCHEMA["properties"]["decisions"]["items"]["properties"])
         ids = decision["candidate_ids"]
@@ -125,16 +129,26 @@ def verification(text, candidates, snapshot):
             raise InvalidReview("Invalid verifier disposition")
         finding = decision["finding"]
         if disposition == "publish":
-            _object(finding, FINDING["properties"])
-            _location(finding, snapshot)
-            if finding["severity"] not in FINDING["properties"]["severity"]["enum"]:
-                raise InvalidReview("Invalid severity")
-            _text(finding, ("title", "body"))
-            accepted.append({**finding, "id": f"finding:{len(accepted) + 1}"})
+            try:
+                _object(finding, FINDING["properties"])
+                _location(finding, snapshot)
+                if finding["severity"] not in FINDING["properties"]["severity"]["enum"]:
+                    raise InvalidReview("Invalid severity")
+                _text(finding, ("title", "body"))
+            except InvalidReview as exc:
+                error = str(exc)
+                decision.update(disposition="unresolved", finding=None,
+                                reason=f"Finding withheld: {error}")
+                validation_errors.append({"candidate_ids": ids, "error": error})
+                result["coverage"]["status"] = "partial"
+                result["coverage"]["limitations"].append(f"Finding withheld: {error}")
+            else:
+                accepted.append({**finding, "id": f"finding:{len(accepted) + 1}"})
         elif finding is not None or not ids:
             raise InvalidReview("Only publish decisions may introduce a finding")
     if seen != expected:
         raise InvalidReview("Verifier omitted candidate decisions")
+    result["validation_errors"] = validation_errors
     return result, accepted
 
 

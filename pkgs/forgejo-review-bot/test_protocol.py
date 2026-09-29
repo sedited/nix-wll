@@ -49,9 +49,82 @@ class ProtocolTests(unittest.TestCase):
     def test_finding_must_refer_to_changed_file_on_correct_side(self):
         decision = {"candidate_ids": ["tests:1"], "disposition": "publish",
                     "reason": "Verified", "finding": {**self.finding, "path": "missing.cpp"}}
-        with self.assertRaises(protocol.InvalidReview):
-            protocol.verification(json.dumps({"coverage": self.coverage, "decisions": [decision]}),
-                                  [{"id": "tests:1"}], self.snapshot)
+        result, accepted = protocol.verification(
+            json.dumps({"coverage": self.coverage, "decisions": [decision]}),
+            [{"id": "tests:1"}], self.snapshot)
+        self.assertEqual(accepted, [])
+        self.assertEqual(result["coverage"]["status"], "partial")
+        self.assertIn("changed file", result["decisions"][0]["reason"])
+        self.assertEqual(result["decisions"][0]["disposition"], "unresolved")
+        self.assertIsNone(result["decisions"][0]["finding"])
+        self.assertEqual(result["validation_errors"][0]["candidate_ids"], ["tests:1"])
+        self.assertIn("missing.cpp", result["validation_errors"][0]["error"])
+
+    def test_invalid_publish_finding_does_not_discard_valid_finding(self):
+        candidates = [{"id": "tests:1"}, {"id": "design:1"}]
+        valid = {"candidate_ids": ["tests:1"], "disposition": "publish",
+                 "reason": "Verified", "finding": self.finding}
+        invalid = {"candidate_ids": ["design:1"], "disposition": "publish",
+                   "reason": "Verified", "finding": {**self.finding, "path": "missing.cpp"}}
+        for decisions in ([valid, invalid], [invalid, valid]):
+            with self.subTest(decisions=decisions):
+                result, accepted = protocol.verification(
+                    json.dumps({"coverage": self.coverage, "decisions": decisions}),
+                    candidates, self.snapshot)
+                self.assertEqual(accepted, [{**self.finding, "id": "finding:1"}])
+                self.assertEqual(result["coverage"]["status"], "partial")
+                self.assertTrue(any("changed file" in limit
+                                    for limit in result["coverage"]["limitations"]))
+                withheld = next(item for item in result["decisions"]
+                                if item["candidate_ids"] == ["design:1"])
+                self.assertEqual(withheld["disposition"], "unresolved")
+                self.assertIsNone(withheld["finding"])
+                self.assertIn("changed file", withheld["reason"])
+                self.assertEqual(result["validation_errors"][0]["candidate_ids"], ["design:1"])
+
+    def test_invalid_new_finding_without_candidate_ids_is_withheld(self):
+        decision = {"candidate_ids": [], "disposition": "publish", "reason": "New issue",
+                    "finding": {**self.finding, "path": "missing.cpp"}}
+        result, accepted = protocol.verification(
+            json.dumps({"coverage": self.coverage, "decisions": [decision]}),
+            [], self.snapshot)
+        self.assertEqual(accepted, [])
+        self.assertEqual(result["coverage"]["status"], "partial")
+        self.assertEqual(result["decisions"][0]["disposition"], "unresolved")
+        self.assertIsNone(result["decisions"][0]["finding"])
+        self.assertEqual(result["validation_errors"][0]["candidate_ids"], [])
+
+    def test_location_errors_identify_the_failed_check(self):
+        cases = (
+            ({"path": "missing.cpp"}, "changed file"),
+            ({"side": "base"}, "base side"),
+            ({"line": 0}, "positive line"),
+            ({"side": "neither"}, "location side"),
+        )
+        self.snapshot.base_files = {}
+        for change, message in cases:
+            with self.subTest(change=change):
+                decision = {"candidate_ids": ["tests:1"], "disposition": "publish",
+                            "reason": "Verified", "finding": {**self.finding, **change}}
+                result, accepted = protocol.verification(
+                    json.dumps({"coverage": self.coverage, "decisions": [decision]}),
+                    [{"id": "tests:1"}], self.snapshot)
+                self.assertEqual(accepted, [])
+                self.assertIn(message, result["validation_errors"][0]["error"])
+
+    def test_invalid_candidate_ids_still_reject_entire_verification(self):
+        candidates = [{"id": "tests:1"}, {"id": "design:1"}]
+        valid = {"candidate_ids": ["tests:1"], "disposition": "publish",
+                 "reason": "Verified", "finding": self.finding}
+        for bad_ids in (["unknown:1"], ["tests:1"], []):
+            with self.subTest(bad_ids=bad_ids):
+                invalid = {"candidate_ids": bad_ids, "disposition": "publish",
+                           "reason": "Verified", "finding": {**self.finding, "path": "missing.cpp"}}
+                with self.assertRaises(protocol.InvalidReview):
+                    protocol.verification(
+                        json.dumps({"coverage": self.coverage,
+                                    "decisions": [valid, invalid]}),
+                        candidates, self.snapshot)
 
     def test_router_cannot_lower_floor_and_selects_design_and_test_review(self):
         proposed = {"tier": "routine", "audits": [], "evidence": ["Small change"],

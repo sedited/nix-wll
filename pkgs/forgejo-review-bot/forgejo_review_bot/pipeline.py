@@ -94,6 +94,8 @@ def review_with_independent_passes(api_key, review, snapshot, bot_config,
             record = stages[name]
             if record["status"] == "completed":
                 record.update(status="invalid", error_type=type(exc).__name__)
+            if isinstance(exc, protocol.InvalidReview):
+                record["validation_error"] = str(exc)
             limitations.append(f"The {name} review did not complete.")
             return False
 
@@ -128,7 +130,10 @@ def review_with_independent_passes(api_key, review, snapshot, bot_config,
         result, accepted = protocol.verification(verified, candidates, snapshot)
         stages["verifier"]["coverage"] = result["coverage"]
         debug["decisions"] = result["decisions"]
-        if result["coverage"]["status"] == "partial":
+        if result["validation_errors"]:
+            stages["verifier"]["validation_errors"] = result["validation_errors"]
+            limitations.append("Some findings failed validation and were withheld.")
+        elif result["coverage"]["status"] == "partial":
             limitations.append("Verification had incomplete evidence.")
         if any(item["disposition"] == "unresolved" for item in result["decisions"]):
             limitations.append("Some candidate findings remain unresolved.")
@@ -137,7 +142,11 @@ def review_with_independent_passes(api_key, review, snapshot, bot_config,
     except Exception as exc:
         if stages["verifier"]["status"] == "completed":
             stages["verifier"].update(status="invalid", error_type=type(exc).__name__)
-        limitations.append("Verification did not complete; no unverified findings were published.")
+        if isinstance(exc, protocol.InvalidReview):
+            stages["verifier"]["validation_error"] = str(exc)
+            limitations.append("Verifier output failed validation; no findings were published.")
+        else:
+            limitations.append("Verification did not complete; no unverified findings were published.")
 
     # The editor sees only accepted findings. A failed editor can use the
     # verifier's own wording, without discarding paid verification work.
@@ -153,6 +162,8 @@ def review_with_independent_passes(api_key, review, snapshot, bot_config,
         except Exception as exc:
             if stages["collator"]["status"] == "completed":
                 stages["collator"].update(status="invalid", error_type=type(exc).__name__)
+            if isinstance(exc, protocol.InvalidReview):
+                stages["collator"]["validation_error"] = str(exc)
             stages["collator"]["used_verified_wording"] = True
     else:
         stages["collator"] = {"model": prompt_config.models["collator"],

@@ -123,8 +123,36 @@ class PipelineTests(unittest.TestCase):
 
         content = self.run_review(review)
         self.assertNotIn("Simplify fixture", content)
-        self.assertIn("Verification did not complete", content)
+        self.assertIn("Verifier output failed validation", content)
         self.assertEqual(self.debug["stages"]["verifier"]["status"], "invalid")
+        self.assertIn("omitted", self.debug["stages"]["verifier"]["validation_error"])
+
+    def test_partial_specialist_and_invalid_finding_preserve_valid_suggestion(self):
+        self.tier, self.audits = "standard", ["tests"]
+
+        def review(*args, **kwargs):
+            stage = kwargs["stage_name"]
+            if stage == "tests":
+                result = json.loads(discovery([candidate()]))
+                result["coverage"] = {"status": "partial", "limitations": ["Caller not inspected"]}
+                return json.dumps(result)
+            if stage == "verifier":
+                return json.dumps({"coverage": COMPLETE, "decisions": [
+                    {"candidate_ids": ["tests:1"], "disposition": "publish",
+                     "reason": "Useful simplification", "finding": self.published},
+                    {"candidate_ids": [], "disposition": "publish",
+                     "reason": "Policy requires release notes", "finding": {
+                         **self.published, "path": "doc/developer-notes.md"}}]})
+            return discovery()
+
+        content = self.run_review(review)
+        self.assertIn(self.published["body"], content)
+        self.assertIn("withheld", content)
+        self.assertNotIn("Verification did not complete", content)
+        self.assertEqual(self.debug["coverage"]["status"], "partial")
+        self.assertIn("doc/developer-notes.md",
+                      self.debug["stages"]["verifier"]["validation_errors"][0]["error"])
+        self.assertIn("doc/developer-notes.md", self.debug["stage_outputs"]["verifier"])
 
     def test_invalid_editor_preserves_verified_wording(self):
         self.tier, self.audits = "routine", []
