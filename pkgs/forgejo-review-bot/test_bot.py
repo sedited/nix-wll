@@ -257,6 +257,21 @@ class BotTests(unittest.TestCase):
                 bot.pull_request_context("token", 42)
         request.assert_called_with("token", "/issues/42")
 
+    def test_secret_deny_paths_resolve_symlinks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            actual = root / "actual"
+            actual.mkdir()
+            link = root / "secrets"
+            link.symlink_to(actual, target_is_directory=True)
+            secret = link / "api-key"
+            with patch.object(bot, "SECRET_PATHS", ()):
+                bot.configure_secret_paths(secret, Path("/run/secrets/api-key"))
+                self.assertIn(str(actual / "api-key"), bot.SECRET_PATHS)
+                self.assertNotIn(str(secret), bot.SECRET_PATHS)
+                self.assertNotIn(str(Path("/run/secrets/api-key").resolve()),
+                                 bot.SECRET_PATHS)
+
     def test_codex_exec_preserves_tools_and_hides_api_key(self):
         events = [
             {"type": "item.completed", "item": {"type": "command_execution",

@@ -46,14 +46,18 @@ MODEL_RATES = {"gpt-6-luna": (0.1, 0.01, 0.125, 0.5),
 INSTRUCTIONS = None
 AUDIT_PROMPTS = None
 MODELS = None
-SECRET_PATHS = ("/run/secrets",)
+SECRET_PATHS = (str(Path("/run/secrets").resolve()),)
 
 
 def configure_secret_paths(*paths):
     global SECRET_PATHS
-    SECRET_PATHS = tuple(sorted({"/run/secrets",
-                                 *(str(path.absolute()) for path in paths),
-                                 *(str(path.resolve()) for path in paths)}))
+    secret_dir = Path("/run/secrets").resolve()
+    denied = {secret_dir}
+    for path in paths:
+        resolved = Path(path).resolve()
+        if not resolved.is_relative_to(secret_dir):
+            denied.add(resolved)
+    SECRET_PATHS = tuple(sorted(map(str, denied)))
 
 
 def load_prompt_file(path):
