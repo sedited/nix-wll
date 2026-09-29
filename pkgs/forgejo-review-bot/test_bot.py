@@ -403,7 +403,7 @@ class BotTests(unittest.TestCase):
         request = send.call_args.args[0]
         sent = json.loads(request.data)
         self.assertIs(sent["store"], False)
-        self.assertEqual(sent["model"], "gpt-6-sol")
+        self.assertEqual(sent["model"], "gpt-6-luna")
         self.assertEqual(sent["tool_choice"], "required")
 
     def test_openai_request_uses_loaded_prompt_file(self):
@@ -458,6 +458,54 @@ class BotTests(unittest.TestCase):
         self.assertEqual(record["name"], "public_contract")
         self.assertEqual(record["input_tokens"], 100)
 
+    def test_tooled_audit_has_only_repository_reads_and_optional_first_call(self):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+            def read(self, *args):
+                return json.dumps({"status": "completed", "output": [{"type": "message",
+                    "content": [{"type": "output_text", "text": "No candidate finding."}]}],
+                    "usage": {"input_tokens": 100, "output_tokens": 20}}).encode()
+
+        with patch.object(bot.urllib.request, "urlopen", return_value=Response()) as send, \
+                patch.object(bot, "tracked_files", return_value={}):
+            answer, record = bot.run_focused_review(
+                "key", "tests", "Check tests", "PR patch", Path("/unused"))
+        request = json.loads(send.call_args.args[0].data)
+        self.assertEqual(request["tool_choice"], "auto")
+        self.assertEqual({tool["name"] for tool in request["tools"]},
+                         {"find_paths", "read_file", "read_base_file",
+                          "read_diff", "search_code"})
+        self.assertEqual(answer, "No candidate finding.")
+        self.assertEqual(record["tool_calls"], 0)
+
+    def test_large_patch_gives_tests_relevant_diff_excerpt(self):
+        changed = "test/functional/example.py\x00src/net.cpp\x00"
+        calls = []
+
+        def git(checkout, *args):
+            calls.append(args)
+            if args[0] == "merge-base":
+                return "a" * 40 + "\n"
+            if args[0] == "diff" and "--name-only" in args:
+                return changed
+            if args[-1] == "test/functional/example.py":
+                return "diff --git a/test/functional/example.py b/test/functional/example.py\n"
+            return "diff --git a/src/net.cpp b/src/net.cpp\n"
+
+        with patch.object(bot, "git", side_effect=git):
+            review = bot.focused_review_input(
+                "Patch exceeds 200000 input bytes. Use read_diff to inspect changed files.",
+                                              Path("/unused"), "tests")
+        self.assertIn("test/functional/example.py", review)
+        self.assertNotIn("src/net.cpp", review)
+        self.assertEqual(len([call for call in calls if call[-1:] ==
+                              ("test/functional/example.py",)]), 1)
+
     def test_incomplete_audit_records_reason_and_usage(self):
         class Response:
             def __enter__(self):
@@ -478,15 +526,22 @@ class BotTests(unittest.TestCase):
         self.assertEqual(record["incomplete_reason"], "max_output_tokens")
         self.assertEqual(record["output_tokens"], 4000)
 
-    def test_four_audits_use_merge_base_notes_and_keep_failures_separate(self):
+    def test_focused_audits_use_tools_selectively_and_keep_failures_separate(self):
         prompts = {name: f"Prompt for {name}" for name in ("common", *bot.AUDIT_NAMES)}
         called = []
 
         def audit(api_key, name, prompt, review, notes):
             called.append((name, prompt, review, notes))
-            if name == "tests":
+            if name == "state":
                 raise urllib.error.HTTPError("https://api.openai.com", 429,
                                              "rate limited", {}, None)
+            return f"Finding from {name}", {"name": name, "model": "gpt-6-luna",
+                                             "status": "completed", "input_tokens": 100,
+                                             "cached_tokens": 0, "cache_write_tokens": 0,
+                                             "output_tokens": 20, "elapsed_seconds": 1.0}
+
+        def tooled(api_key, name, prompt, review, checkout):
+            called.append((name, prompt, review, checkout))
             return f"Finding from {name}", {"name": name, "model": "gpt-6-luna",
                                              "status": "completed", "input_tokens": 100,
                                              "cached_tokens": 0, "cache_write_tokens": 0,
@@ -495,16 +550,19 @@ class BotTests(unittest.TestCase):
         debug = {}
         with patch.object(bot, "audit_prompts", return_value=prompts), \
                 patch.object(bot, "audit_developer_notes", return_value="base notes"), \
-                patch.object(bot, "run_audit", side_effect=audit):
+                patch.object(bot, "run_audit", side_effect=audit), \
+                patch.object(bot, "run_focused_review", side_effect=tooled):
             leads = bot.run_audits("key", "PR patch", Path("/unused"), debug)
         self.assertEqual({item[0] for item in called}, set(bot.AUDIT_NAMES))
-        self.assertTrue(all(item[2] == "PR patch" and item[3] == "base notes"
-                            for item in called))
+        self.assertTrue(all(item[2] == "PR patch" for item in called))
+        self.assertEqual({item[0] for item in called if item[3] == "base notes"},
+                         set(bot.AUDIT_NAMES) - set(bot.TOOLED_AUDITS))
         self.assertEqual([item["name"] for item in debug["audits"]],
                          list(bot.AUDIT_NAMES))
-        self.assertEqual(debug["audits"][2]["http_status"], 429)
-        self.assertIn("state:\nFinding from state", leads)
-        self.assertIn("tests:\nAudit unavailable.", leads)
+        self.assertEqual(debug["audits"][0]["http_status"], 429)
+        self.assertIn("tests:\nFinding from tests", leads)
+        self.assertIn("design:\nFinding from design", leads)
+        self.assertIn("state:\nAudit unavailable.", leads)
 
     def test_developer_notes_are_read_at_merge_base(self):
         base = "b" * 40
@@ -574,12 +632,12 @@ class BotTests(unittest.TestCase):
         body = bot.review_body("b" * 40, "a" * 40, "Review text.", debug)
         metrics = bot.review_metrics(debug)
         trace = bot.review_trace(debug)
-        self.assertEqual(metrics["estimated_cost_usd"], 0.000219)
+        self.assertEqual(metrics["estimated_cost_usd"], 0.000011)
         self.assertEqual(metrics["total_input_tokens"], 100)
         self.assertEqual(metrics["total_output_tokens"], 5)
         self.assertEqual(trace["estimated_cost_usd"], metrics["estimated_cost_usd"])
         self.assertIn("estimated_cost_usd", body)
-        self.assertIn("0.000219", body)
+        self.assertIn("1.1e-05", body)
         self.assertIn("total_model_seconds", body)
         self.assertIn("&lt;/details&gt;", body)
         self.assertNotIn("<script>", body)
@@ -599,7 +657,7 @@ class BotTests(unittest.TestCase):
                              "elapsed_seconds": 1.0}]}
         metrics = bot.review_metrics(debug)
         self.assertEqual(metrics["audit_calls"], 2)
-        self.assertEqual(metrics["estimated_cost_usd"], 0.002460)
+        self.assertEqual(metrics["estimated_cost_usd"], 0.002252)
         self.assertEqual(metrics["total_input_tokens"], 1600)
         self.assertEqual(metrics["total_output_tokens"], 4205)
 
@@ -615,7 +673,7 @@ class BotTests(unittest.TestCase):
         self.assertEqual(metrics["tool_calls"], 2)
         self.assertEqual(metrics["total_input_tokens"], 200)
         self.assertEqual(metrics["total_output_tokens"], 20)
-        self.assertEqual(metrics["estimated_cost_usd"], 0.0006)
+        self.assertEqual(metrics["estimated_cost_usd"], 0.000315)
 
     def test_review_body_starts_with_commit_ids(self):
         base = "b" * 40
@@ -909,7 +967,7 @@ class BotTests(unittest.TestCase):
         self.assertIn("tool_calls=2", output)
         self.assertIn("input_tokens=100", output)
         self.assertIn("output_tokens=5", output)
-        self.assertIn("estimated_usd=0.000219", output)
+        self.assertIn("estimated_usd=1.1e-05", output)
 
     def test_worker_logs_stale_outcome_before_model_call(self):
         with patch.object(bot, "find_comment", return_value=None), \

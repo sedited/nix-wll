@@ -30,6 +30,8 @@ MAX_REVIEW_BYTES = 200_000
 MAX_FILE_BYTES = 1_000_000
 MAX_TOOL_BYTES = 12_000
 MAX_TOOL_CALLS = 24
+MAX_FOCUSED_TOOL_CALLS = 6
+MAX_FOCUSED_DIFF_BYTES = 80_000
 MAX_MODEL_TURNS = 10
 MAX_OUTPUT_TOKENS = 6_000
 MAX_AUDIT_OUTPUT_TOKENS = 4_000
@@ -42,7 +44,8 @@ SHA = re.compile(r"^[0-9a-f]{40}$")
 BRANCH = re.compile(r"^[A-Za-z0-9._/-]+$")
 DEFAULT_PROMPT_FILE = Path(__file__).with_name("prompt.md")
 DEFAULT_AUDIT_DIR = Path(__file__).with_name("audits")
-AUDIT_NAMES = ("state", "public_contract", "tests", "developer_notes")
+AUDIT_NAMES = ("state", "public_contract", "tests", "developer_notes", "design")
+TOOLED_AUDITS = ("tests", "design")
 MODEL_NAMES = ("independent", "adversarial", *AUDIT_NAMES, "verifier", "collator")
 MODEL_RATES = {"gpt-6-luna": (0.1, 0.01, 0.125, 0.5),
                "gpt-6-sol": (2, 0.2, 2.5, 10)}
@@ -113,6 +116,7 @@ TOOLS = [
          "path": {"type": "string", "description": "Repository-relative file path"}},
          "required": ["commit", "path"], "additionalProperties": False}},
 ]
+FOCUSED_TOOLS = TOOLS[:5]
 
 
 def load_prompt_file(path):
@@ -503,14 +507,68 @@ def run_audit(api_key, name, prompt, review, notes=""):
     return clipped, record
 
 
+def focused_review_input(review, checkout, name):
+    if f"Patch exceeds {MAX_REVIEW_BYTES} input bytes. Use read_diff" not in review:
+        return review
+    base = git(checkout, "merge-base", "refs/review-bot/base", "HEAD").strip()
+    paths = [path for path in git(checkout, "diff", "--name-only", "-z",
+                                  f"{base}..HEAD").split("\x00") if path]
+    if name == "tests":
+        paths = [path for path in paths if path.startswith(("test/", "tests/", "qa/"))]
+    elif name == "design":
+        paths = [path for path in paths if not path.startswith(("test/", "tests/", "qa/", "doc/"))]
+    excerpt = []
+    size = 0
+    for path in paths:
+        patch = git(checkout, "diff", "--no-ext-diff", "--no-color",
+                    f"{base}..HEAD", "--", path)
+        if size + len(patch.encode()) > MAX_FOCUSED_DIFF_BYTES:
+            excerpt.append(patch.encode()[:MAX_FOCUSED_DIFF_BYTES - size]
+                           .decode(errors="replace"))
+            excerpt.append("\n[Diff excerpt truncated. Read the file diff with a tool if available.]\n")
+            break
+        excerpt.append(patch)
+        size += len(patch.encode())
+    return review + "\nRelevant diff excerpt:\n" + "".join(excerpt)
+
+
+def run_focused_review(api_key, name, prompt, review, checkout):
+    stage_debug = {}
+    answer = openai_review(api_key, review, checkout, stage_debug,
+                           prompt=prompt, model=stage_models()[name],
+                           tools=FOCUSED_TOOLS, max_tool_calls=MAX_FOCUSED_TOOL_CALLS,
+                           first_tool_required=False)
+    turns = stage_debug["turns"]
+    record = {"name": name, "model": stage_models()[name], "status": "completed",
+              "input_tokens": sum(turn.get("input_tokens") or 0 for turn in turns),
+              "cached_tokens": sum(turn.get("cached_tokens") or 0 for turn in turns),
+              "cache_write_tokens": sum(turn.get("cache_write_tokens") or 0 for turn in turns),
+              "output_tokens": sum(turn.get("output_tokens") or 0 for turn in turns),
+              "elapsed_seconds": sum(turn["elapsed_seconds"] for turn in turns),
+              "tool_calls": len(stage_debug["tools"]),
+              "response_output_sha256": hashlib.sha256(answer.encode()).hexdigest(),
+              "output_truncated": len(answer.encode()) > MAX_AUDIT_OUTPUT_BYTES}
+    if record["output_truncated"]:
+        answer = answer.encode()[:MAX_AUDIT_OUTPUT_BYTES].decode(errors="replace")
+        answer += "\n[Audit output truncated]"
+    return answer, record
+
+
 def run_audits(api_key, review, checkout, debug):
     prompts = audit_prompts()
     models = stage_models()
     notes = audit_developer_notes(checkout)
     with ThreadPoolExecutor(max_workers=len(AUDIT_NAMES)) as pool:
-        futures = {name: pool.submit(run_audit, api_key, name,
-                                     prompts["common"] + "\n\n" + prompts[name],
-                                     review, notes) for name in AUDIT_NAMES}
+        futures = {}
+        for name in AUDIT_NAMES:
+            prompt = prompts["common"] + "\n\n" + prompts[name]
+            input_text = focused_review_input(review, checkout, name)
+            if name in TOOLED_AUDITS:
+                futures[name] = pool.submit(run_focused_review, api_key, name,
+                                            prompt, input_text, checkout)
+            else:
+                futures[name] = pool.submit(run_audit, api_key, name,
+                                            prompt, input_text, notes)
         results = []
         records = []
         for name, future in futures.items():
@@ -529,9 +587,11 @@ def run_audits(api_key, review, checkout, debug):
 
 
 def openai_review(api_key, review, checkout, debug=None, current_pr=None,
-                  prompt=None, model=None):
+                  prompt=None, model=None, tools=None,
+                  max_tool_calls=MAX_TOOL_CALLS, first_tool_required=True):
     prompt = instructions() if prompt is None else prompt
     model = stage_models()["independent"] if model is None else model
+    tools = TOOLS if tools is None else tools
     files = tracked_files(checkout)
     inputs = [{"role": "user", "content": review}]
     if debug is not None:
@@ -548,12 +608,12 @@ def openai_review(api_key, review, checkout, debug=None, current_pr=None,
     changed_paths = None
     for turn in range(MAX_MODEL_TURNS):
         input_data = json.dumps(inputs).encode()
-        tool_choice = ("required" if turn == 0 else
-                       "none" if calls_used >= MAX_TOOL_CALLS
-                       or turn == MAX_MODEL_TURNS - 1 else "auto")
+        tool_choice = ("none" if calls_used >= max_tool_calls
+                       or turn == MAX_MODEL_TURNS - 1 else
+                       "required" if turn == 0 and first_tool_required else "auto")
         payload = json.dumps({"model": model, "store": False,
                               "instructions": prompt, "input": inputs,
-                              "tools": TOOLS, "tool_choice": tool_choice,
+                              "tools": tools, "tool_choice": tool_choice,
                               "max_output_tokens": MAX_OUTPUT_TOKENS}).encode()
         request = urllib.request.Request(
             "https://api.openai.com/v1/responses",
@@ -593,7 +653,7 @@ def openai_review(api_key, review, checkout, debug=None, current_pr=None,
         if calls:
             inputs.extend(output)
             for call in calls:
-                if calls_used >= MAX_TOOL_CALLS:
+                if calls_used >= max_tool_calls:
                     answer = "Inspection limit reached. Finish with evidence already available."
                 else:
                     calls_used += 1
@@ -699,7 +759,7 @@ def review_with_independent_passes(api_key, review, checkout, current_pr, debug)
     debug["independent_review_sha256"] = hashlib.sha256(sol_review.encode()).hexdigest()
     debug["adversarial_review_sha256"] = hashlib.sha256(
         adversarial_review.encode()).hexdigest()
-    reviews = (f"Independent Sol review:\n{sol_review}\n\n"
+    reviews = (f"Independent review:\n{sol_review}\n\n"
                f"Adversarial Sol review:\n{adversarial_review}\n\n{luna_reviews}")
 
     debug["pipeline_stage"] = "verification"
@@ -898,7 +958,9 @@ def review_metrics(debug):
     known_usage = all(isinstance(call.get("input_tokens"), int)
                       and isinstance(call.get("output_tokens"), int)
                       for call, _rates in calls)
-    metrics = {"model_turns": len(turns), "tool_calls": len(tools),
+    metrics = {"model_turns": len(turns),
+               "tool_calls": len(tools) + sum(audit.get("tool_calls", 0)
+                                              for audit in audits),
                "audit_calls": len(audits),
                "estimated_cost_usd": None, "total_input_tokens": None,
                "total_output_tokens": None, "total_model_seconds": None}

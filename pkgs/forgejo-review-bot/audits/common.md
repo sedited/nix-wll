@@ -6,5 +6,7 @@ the checkout before publishing anything.
 
 Return `No candidate finding.` or at most two concise candidate findings. For
 each, name a file and changed location, a concrete scenario, its consequence,
-and the evidence or uncertainty. Do not summarize the patch, praise it, or
-fill a checklist with non-findings.
+and the evidence or uncertainty. For a design or test-quality suggestion, name
+the current cost or limitation, the concrete alternative, and why the required
+behavior is preserved. Do not summarize the patch, praise it, or fill a
+checklist with non-findings.
