@@ -112,7 +112,7 @@ def _month_now():
 class Ledger:
     """A SQLite ledger that reserves monthly spend before API requests."""
 
-    def __init__(self, path, review_limit_usd=0.60, monthly_limit_usd=None,
+    def __init__(self, path, review_limit_usd=1.00, monthly_limit_usd=None,
                  input_padding_tokens=1024):
         self.path = str(path)
         self.review_limit_micros = _limit_micros(review_limit_usd, "review_limit_usd")

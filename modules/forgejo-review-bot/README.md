@@ -21,22 +21,36 @@ is capped.
 A Luna router selects relevant specialists, with code rules requiring deeper
 review for sensitive paths and incomplete input. Routine changes use Luna.
 Sensitive changes also receive an independent Sol discovery review. The
-verifier and writing pass stay on Luna. Design review covers architecture,
+verifier and writing pass stay on Luna. Lightweight routing skips Sol and
+specialist stages that do not fit the change. Design review covers architecture,
 project conventions and taste; the tests audit checks whether coverage
 justifies the amount of test code, fixtures and runtime.
+
+Each discovery stage gets up to 6 tool inspections for routine reviews, 12 for
+standard reviews, or 24 for sensitive reviews. The verifier gets 24. At the
+inspection limit, further reads are refused and the model gets a final turn
+without tools, subject to the remaining spending allowance. It returns supported
+findings and names material unanswered evidence. Debug output records the limit
+and which requests were skipped.
 
 Discovery stages return structured candidates. The verifier accounts for each
 candidate as published, dropped or unresolved, and the writing pass receives
 only accepted findings. Python checks finding IDs and preserves verified
-locations and severity. Failed or budget-limited audits produce an explicit
-incomplete-coverage notice. If only editing fails, the verified wording is used.
+locations and severity. A bad verifier finding is withheld without discarding
+other valid findings, and debug output identifies the validation error. Partial
+coverage alone does not discard findings. Broken candidate accounting or a
+failed verifier still prevents publication of unverified findings. If only
+editing fails, the verified wording is used.
 
-The default per-review allowance is USD 0.60. Before each API request the bot
-reserves a conservative input/output cost estimate, with some allowance held
-for verification and editing. Reported usage settles the reservation; missing
-usage or an ambiguous transport failure retains conservative estimated charges.
-These estimates depend on configured model prices and API token accounting,
-so they are not an invoice guarantee. Unknown model prices prevent requests.
+The default per-review spending ceiling is USD 1.00. It is an allowance for
+complex reviews, not a target spend. Lightweight routing still skips Sol and
+irrelevant specialist stages. Before each API request the bot reserves a
+conservative input/output cost estimate, holding some allowance for verification
+and editing. Reported usage settles the reservation;
+missing usage or an ambiguous transport failure retains conservative estimated
+charges. These estimates depend on configured model prices and API token
+accounting, so they are not an invoice guarantee. Unknown model prices prevent
+requests.
 The optional monthly allowance is unset by default. The ledger retains monthly
 totals and includes failed requests whose charges are uncertain.
 
@@ -119,7 +133,8 @@ be derived from `forgejoApi`.
 
 ## Cost and routing options
 
-- `reviewBudgetUsd = 0.60`: per-review estimated allowance. It spans retries.
+- `reviewBudgetUsd = 1.00`: per-review spending ceiling. It spans retries and
+  is not a target spend.
 - `monthlyBudgetUsd = null`: optional ceiling on the month's recorded charges
   and outstanding reservations.
 - `routingMode = "enabled"`: apply conservative routing.
@@ -172,7 +187,7 @@ configuration; discussion tools and lazy Git downloads are disabled:
 forgejo-review-bot-evaluate run \
   --state-dir ./evaluation-state --output-dir ./results \
   --openai-key-file /run/secrets/openai-key \
-  --review-budget-usd 0.60 \
+  --review-budget-usd 1.00 \
   ./cases/case-123-*.json
 ```
 

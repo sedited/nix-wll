@@ -320,7 +320,7 @@ def main(argv=None):
     run.add_argument("--models-json", type=Path)
     run.add_argument("--routing-mode", choices=("enabled", "shadow", "full"),
                      default="enabled")
-    run.add_argument("--review-budget-usd", type=float, default=0.60)
+    run.add_argument("--review-budget-usd", type=float, default=1.00)
     run.add_argument("--monthly-budget-usd", type=float)
     run.add_argument("--labels-json", type=Path,
                      help="Optional local labels keyed by case ID; never sent to models")

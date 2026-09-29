@@ -119,11 +119,12 @@ in
 
     reviewBudgetUsd = lib.mkOption {
       type = lib.types.addCheck lib.types.number (value: value > 0);
-      default = 0.60;
+      default = 1.00;
       description = ''
-        Per-review allowance in USD. Each API request reserves a conservative
-        estimate before starting. Reviews that exhaust their allowance report
-        incomplete coverage. Reservations are estimates, not an invoice cap.
+        Per-review spending ceiling in USD. Each API request reserves a
+        conservative estimate before starting. Reviews that exhaust their
+        allowance report incomplete coverage.
+        Reservations are estimates, not an invoice cap.
       '';
     };
 

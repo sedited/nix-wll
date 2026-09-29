@@ -332,7 +332,7 @@ def main():
                         help="Directory containing the focused Luna audit prompts")
     parser.add_argument("--models-json", type=Path,
                         help="JSON model routing for each review stage")
-    parser.add_argument("--review-budget-usd", type=float, default=0.60)
+    parser.add_argument("--review-budget-usd", type=float, default=1.00)
     parser.add_argument("--monthly-budget-usd", type=float)
     parser.add_argument("--routing-mode", choices=("enabled", "shadow", "full"),
                         default="enabled")
