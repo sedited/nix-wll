@@ -4,26 +4,33 @@ This module runs `forgejo-review-bot`, a webhook receiver that posts a
 first-pass review on Forgejo pull requests.
 
 The bot fetches the base branch and PR head into its own state directory,
-then runs each review stage through `codex exec` with the model selected in
-`auditPromptDir/models.json`. Codex can inspect the checkout with its normal
-tools under the service's systemd restrictions. The review prompts prohibit
-using discussion on the current PR; this is an instruction to Codex rather
-than a restriction imposed by a custom discussion tool.
+reviews the PR title, description, commit messages, and diff, and gives the
+model read-only tools for path discovery, numbered head and merge-base file
+reads, per-file diff reads, and literal code search. Large patches are replaced
+by a changed-file list so the model can read relevant diffs on demand. It never
+builds, runs, or tests pull request code.
 
-Five focused reviews check state, public contracts, test evidence, developer
-notes, and design. They run alongside independent and adversarial reviews. A
-verifier checks their candidate findings, and a collator formats the accepted
-findings for the single bot comment. Text-only stages run outside the checkout.
-The bot gives Codex its API key as `CODEX_API_KEY` and excludes it from shell
-commands. Shell tools run as the bot service user and can read its secret
-files. The collapsed comment debug section includes stage status, usage,
-and estimated cost without full candidate text.
+The model can also search and read other public issues and pull requests in the
+same repository, including a small sample of ordinary comments. The current PR
+is excluded from these tools, so its comments cannot influence the review.
+These reads use no Forgejo credentials and are limited to four calls per review.
+It can inspect up to 20 lines of merge-base blame and read a related ancestor
+commit's message and file diff, with four history calls per review. Tool output
+is capped.
 
-`auditPromptDir` contains the stage prompts and `models.json`. Each stage's
-model can be changed separately in that file. `codexPackage` must point to a
-Codex CLI package; the host can use the latest pinned package from
-`numtide/llm-agents.nix`. Pass `inputs` through the host's
-`specialArgs` when using the example below.
+Four focused reviews check state and failure behavior, public contracts and
+release notes, test evidence, and documented developer conventions. They run
+alongside an independent checkout-backed review. The developer-notes call
+receives `doc/developer-notes.md` from the PR merge base. A second checkout-
+backed review verifies every distinct candidate, then a context-free collator
+formats the accepted findings for the single bot comment. The four focused
+reviews do not run code or read current PR discussion. Their failures do not
+prevent independent review. The collapsed comment debug section includes
+stage status, usage, and estimated cost without raw candidate text.
+
+`auditPromptDir` contains the four audit prompts, verifier and collator prompts,
+and `models.json`. Each stage's model can be changed separately in that file;
+cost estimates are available for the configured GPT-6 Sol and Luna models.
 
 The bot writes at most one comment per pull request. New reviews edit the
 existing bot-owned comment when the content changes, and leave it untouched
@@ -36,7 +43,6 @@ Normal Forgejo webhooks leave this field unset.
 ## Minimal configuration
 
 ```nix
-{ inputs, pkgs, ... }:
 {
   imports = [
     inputs.will-nix.nixosModules.forgejo-review-bot
@@ -44,7 +50,6 @@ Normal Forgejo webhooks leave this field unset.
 
   services.forgejoReviewBot = {
     enable = true;
-    codexPackage = inputs.llm-agents.packages.${pkgs.stdenv.hostPlatform.system}.codex;
     origin = "https://git.example.org/owner/repo.git";
     repository = "owner/repo";
     forgejoApi = "https://git.example.org/api/v1/repos/owner/repo";
@@ -66,8 +71,6 @@ events.
 
 Required deployment options:
 
-- `services.forgejoReviewBot.codexPackage`: Codex CLI package in the service
-  PATH, for example from a pinned `numtide/llm-agents.nix` input.
 - `services.forgejoReviewBot.origin`: Git remote URL used for `git fetch` and
   stale-head checks.
 - `services.forgejoReviewBot.repository`: Forgejo repository full name, for

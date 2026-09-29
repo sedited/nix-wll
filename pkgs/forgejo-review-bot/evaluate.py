@@ -72,7 +72,7 @@ def replay_pull_request(api_key, forgejo_token, checkout, output_dir, number):
         content = f"Skipped: {skip}"
     else:
         content = bot.review_with_independent_passes(
-            api_key, review, checkout, debug)
+            api_key, review, checkout, number, debug)
     stage_outputs = debug.get("stage_outputs", {})
     final_comment = bot.review_body(base_sha, head_sha, content, debug)
     artifact = {

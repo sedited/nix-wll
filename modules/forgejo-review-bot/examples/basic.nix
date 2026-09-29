@@ -1,8 +1,6 @@
-{ inputs, pkgs, ... }:
 {
   services.forgejoReviewBot = {
     enable = true;
-    codexPackage = inputs.llm-agents.packages.${pkgs.stdenv.hostPlatform.system}.codex;
     origin = "https://git.example.org/owner/repo.git";
     repository = "owner/repo";
     forgejoApi = "https://git.example.org/api/v1/repos/owner/repo";
