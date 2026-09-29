@@ -36,6 +36,10 @@ class JobSource:
             return self.jobs.pop(0)
         raise StopIteration
 
+    def put(self, _job):
+        # This source supplies only the scripted jobs above.
+        pass
+
     def task_done(self):
         pass
 
@@ -1014,6 +1018,7 @@ class BotTests(unittest.TestCase):
                 patch.object(bot, "pull_request_context", return_value=("Title", "Body")), \
                 patch.object(bot, "collect_review",
                              return_value=("b" * 40, "c" * 40, None, "changed")), \
+                patch.object(bot, "current_head", return_value="c" * 40), \
                 patch.object(bot, "openai_review") as model, \
                 patch.object(bot, "publish_review") as publish:
             with self.assertLogs(level="INFO") as logs, self.assertRaises(StopIteration):

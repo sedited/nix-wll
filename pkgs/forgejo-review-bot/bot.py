@@ -1102,6 +1102,15 @@ def publish_review(token, number, bot_login, base_sha, head_sha, content, debug=
     return "updated"
 
 
+def requeue_latest_head(jobs, number, base_ref, expected_head, action, force):
+    latest_head = current_head(number)
+    if latest_head == expected_head:
+        return
+    logging.info("review stale head pr=%d expected=%s latest=%s; requeueing",
+                 number, short_sha(expected_head), short_sha(latest_head))
+    jobs.put((number, base_ref, latest_head, action, force))
+
+
 def short_sha(sha):
     return sha[:12]
 
@@ -1151,6 +1160,7 @@ def worker(jobs, state_dir, api_key, forgejo_token, bot_login):
             base_sha, head_sha, review, skip = collect_review(
                 checkout, number, base_ref, expected_head, title, description)
             if head_sha != expected_head:
+                requeue_latest_head(jobs, number, base_ref, expected_head, action, force)
                 log_review_outcome(number, action, expected_head, "stale", started, debug)
                 continue
             debug = {"skip": skip} if skip else {}
@@ -1166,6 +1176,8 @@ def worker(jobs, state_dir, api_key, forgejo_token, bot_login):
             stage = "publish"
             result = publish_review(forgejo_token, number, bot_login,
                                     base_sha, head_sha, content, debug)
+            if result == "stale":
+                requeue_latest_head(jobs, number, base_ref, head_sha, action, force)
             log_review_outcome(number, action, expected_head, result, started, debug)
         except urllib.error.HTTPError as exc:
             host = urllib.parse.urlsplit(exc.url or "").hostname
