@@ -29,6 +29,10 @@ let
     cfg.promptFile
     "--audit-prompt-dir"
     cfg.auditPromptDir
+    "--review-budget-usd"
+    (toString cfg.reviewBudgetUsd)
+    "--routing-mode"
+    cfg.routingMode
     "--openai-key-file"
     cfg.openaiKeyFile
     "--webhook-secret-file"
@@ -41,6 +45,14 @@ let
   ++ lib.optionals (cfg.repositoryUrl != null) [
     "--repository-url"
     cfg.repositoryUrl
+  ]
+  ++ lib.optionals (cfg.modelsJson != null) [
+    "--models-json"
+    cfg.modelsJson
+  ]
+  ++ lib.optionals (cfg.monthlyBudgetUsd != null) [
+    "--monthly-budget-usd"
+    (toString cfg.monthlyBudgetUsd)
   ];
 in
 {
@@ -99,6 +111,42 @@ in
       description = "Directory containing review stage prompts and models.json.";
     };
 
+    modelsJson = lib.mkOption {
+      type = lib.types.nullOr lib.types.path;
+      default = null;
+      description = "Optional replacement for auditPromptDir/models.json.";
+    };
+
+    reviewBudgetUsd = lib.mkOption {
+      type = lib.types.addCheck lib.types.number (value: value > 0);
+      default = 0.60;
+      description = ''
+        Per-review allowance in USD. Each API request reserves a conservative
+        estimate before starting. Reviews that exhaust their allowance report
+        incomplete coverage. Reservations are estimates, not an invoice cap.
+      '';
+    };
+
+    monthlyBudgetUsd = lib.mkOption {
+      type = lib.types.nullOr (lib.types.addCheck lib.types.number (value: value > 0));
+      default = null;
+      description = "Optional monthly API allowance in USD, shared by reviews in this state directory.";
+    };
+
+    routingMode = lib.mkOption {
+      type = lib.types.enum [
+        "enabled"
+        "shadow"
+        "full"
+      ];
+      default = "enabled";
+      description = ''
+        Select audits with conservative Luna routing, record routing decisions
+        while running the full review in shadow mode, or always run the full
+        review. All modes respect the review allowance.
+      '';
+    };
+
     listenAddress = lib.mkOption {
       type = lib.types.str;
       default = "127.0.0.1";
@@ -114,7 +162,7 @@ in
     stateDir = lib.mkOption {
       type = lib.types.str;
       default = "/var/lib/forgejo-review-bot";
-      description = "Directory containing the bot checkout state.";
+      description = "Private directory containing Git objects, durable jobs, review traces and the spend ledger.";
     };
 
     openaiKeyFile = lib.mkOption {

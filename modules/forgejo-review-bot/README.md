@@ -18,27 +18,43 @@ It can inspect up to 20 lines of merge-base blame and read a related ancestor
 commit's message and file diff, with four history calls per review. Tool output
 is capped.
 
-Four focused reviews check state and failure behavior, public contracts and
-release notes, test evidence, and documented developer conventions. They run
-alongside an independent checkout-backed review. The developer-notes call
-receives `doc/developer-notes.md` from the PR merge base. A second checkout-
-backed review verifies every distinct candidate, then a context-free collator
-formats the accepted findings for the single bot comment. The four focused
-reviews do not run code or read current PR discussion. Their failures do not
-prevent independent review. The collapsed comment debug section includes
-stage status, usage, and estimated cost without raw candidate text.
+A Luna router selects relevant specialists, with code rules requiring deeper
+review for sensitive paths and incomplete input. Routine changes use Luna.
+Sensitive changes also receive an independent Sol discovery review. The
+verifier and writing pass stay on Luna. Design review covers architecture,
+project conventions and taste; the tests audit checks whether coverage
+justifies the amount of test code, fixtures and runtime.
 
-`auditPromptDir` contains the four audit prompts, verifier and collator prompts,
-and `models.json`. Each stage's model can be changed separately in that file;
-cost estimates are available for the configured GPT-6 Sol and Luna models.
+Discovery stages return structured candidates. The verifier accounts for each
+candidate as published, dropped or unresolved, and the writing pass receives
+only accepted findings. Python checks finding IDs and preserves verified
+locations and severity. Failed or budget-limited audits produce an explicit
+incomplete-coverage notice. If only editing fails, the verified wording is used.
 
-The bot writes at most one comment per pull request. New reviews edit the
-existing bot-owned comment when the content changes, and leave it untouched
-when it is already current.
+The default per-review allowance is USD 0.60. Before each API request the bot
+reserves a conservative input/output cost estimate, with some allowance held
+for verification and editing. Reported usage settles the reservation; missing
+usage or an ambiguous transport failure retains conservative estimated charges.
+These estimates depend on configured model prices and API token accounting,
+so they are not an invoice guarantee. Unknown model prices prevent requests.
+The optional monthly allowance is unset by default. The ledger retains monthly
+totals and includes failed requests whose charges are uncertain.
 
-To rerun a review after changing the prompt or tools without a new PR commit,
-send a signed synthetic pull request webhook with `"review_bot_force": true`.
-Normal Forgejo webhooks leave this field unset.
+Jobs are persisted before the webhook receives a 202 response. Pending PR
+updates are coalesced, stale work stops between model requests, and completed
+review payloads are saved before publication. Publication retries reuse that
+payload. Transient failures have bounded retries; pending claims recover when
+the service restarts. The bot retains one editable comment per PR.
+
+The collapsed public debug section intentionally includes clipped preliminary
+responses during development, including findings the verifier rejected. The
+main comment contains verified findings. Private traces preserve full responses
+and per-request usage, including failures.
+
+To force a fresh review of the same head, send a signed synthetic pull request
+webhook with `"review_bot_force": true`. Normal Forgejo webhooks omit this field.
+A forced review receives a new allowance. Changing prompts does not
+automatically rerun previously reviewed heads.
 
 ## Minimal configuration
 
@@ -100,3 +116,73 @@ Useful defaults:
 
 Set `repositoryUrl` only when the HTML URL in Forgejo webhook payloads cannot
 be derived from `forgejoApi`.
+
+## Cost and routing options
+
+- `reviewBudgetUsd = 0.60`: per-review estimated allowance. It spans retries.
+- `monthlyBudgetUsd = null`: optional ceiling on the month's recorded charges
+  and outstanding reservations.
+- `routingMode = "enabled"`: apply conservative routing.
+- `routingMode = "shadow"`: record the proposed route while requesting every
+  audit. This costs more and still respects the same allowance.
+- `routingMode = "full"`: request every audit without calling the router.
+- `modelsJson = null`: optional per-stage replacement for the model map.
+  The map must include router, independent, adversarial, state,
+  public_contract, tests, developer_notes, design, verifier and collator.
+  Prices must also be supported by the bot's ledger.
+
+Enabled routing is the default to control spend. Routing rules and contracts
+are covered by local tests; model quality and recall still need evaluation on
+representative frozen PRs. No production-quality claim follows from those
+unit tests.
+
+The service writes a monthly spend summary to its journal after each job.
+Read the ledger directly without an API key:
+
+```sh
+forgejo-review-bot-evaluate spend --state-dir /var/lib/forgejo-review-bot
+```
+
+Use the service account or another account permitted to read its private state.
+The summary includes outstanding reservations in estimated_total_usd;
+reserved_total_usd is the portion whose charge has not been settled.
+usage_complete is false when any reported count or response is missing.
+
+## Frozen prompt and routing experiments
+
+The package installs `forgejo-review-bot-evaluate` with three subcommands.
+Capture performs Forgejo/Git reads but makes no model calls:
+
+```sh
+forgejo-review-bot-evaluate capture \
+  --state-dir ./evaluation-state --output-dir ./cases \
+  --origin https://git.example.org/owner/repo.git \
+  --repository owner/repo \
+  --forgejo-api https://git.example.org/api/v1/repos/owner/repo \
+  --forgejo-token-file /run/secrets/forgejo-token \
+  123
+```
+
+Capture retains complete Git objects in a dedicated evaluation checkout. The
+initial download can be large. Keep that checkout with the manifests.
+Replay reads frozen title/body, commit IDs, Git objects and prompt/model
+configuration; discussion tools and lazy Git downloads are disabled:
+
+```sh
+forgejo-review-bot-evaluate run \
+  --state-dir ./evaluation-state --output-dir ./results \
+  --openai-key-file /run/secrets/openai-key \
+  --review-budget-usd 0.60 \
+  ./cases/case-123-*.json
+```
+
+Run supports `--prompt-file`, `--audit-prompt-dir`, `--models-json` and
+`--routing-mode` overrides. Each run gets a distinct private JSON artifact
+with effective configuration identity, raw stage results, usage, final comment
+and any failure. Optional `--labels-json` maps case IDs to expected findings;
+these labels are saved for comparison and never sent to reviewers.
+
+Compare useful findings and missed known findings alongside cost, incomplete
+coverage and wall time. An empty review is not proof of a good route. Shadow
+routing is useful for a bounded comparison before changing sensitive path
+rules or removing a specialist.
