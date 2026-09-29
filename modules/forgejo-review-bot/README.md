@@ -6,18 +6,18 @@ first-pass review on Forgejo pull requests.
 The bot fetches the base branch and PR head into its own state directory,
 then runs each review stage through `codex exec` with the model selected in
 `auditPromptDir/models.json`. Codex can inspect the checkout with its normal
-tools in a read-only sandbox. The review prompts prohibit using discussion on
-the current PR; this is an instruction to Codex rather than a restriction
-imposed by a custom discussion tool.
+tools under the service's systemd restrictions. The review prompts prohibit
+using discussion on the current PR; this is an instruction to Codex rather
+than a restriction imposed by a custom discussion tool.
 
 Five focused reviews check state, public contracts, test evidence, developer
 notes, and design. They run alongside independent and adversarial reviews. A
 verifier checks their candidate findings, and a collator formats the accepted
 findings for the single bot comment. Text-only stages run outside the checkout.
 The bot gives Codex its API key as `CODEX_API_KEY` and excludes it from shell
-commands. It also denies the configured secret files to shell tools. The
-collapsed comment debug section includes stage status, usage, and estimated
-cost without full candidate text.
+commands. Shell tools run as the bot service user and can read its secret
+files. The collapsed comment debug section includes stage status, usage,
+and estimated cost without full candidate text.
 
 `auditPromptDir` contains the stage prompts and `models.json`. Each stage's
 model can be changed separately in that file. `codexPackage` must point to a

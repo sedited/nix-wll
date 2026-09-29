@@ -257,21 +257,6 @@ class BotTests(unittest.TestCase):
                 bot.pull_request_context("token", 42)
         request.assert_called_with("token", "/issues/42")
 
-    def test_secret_deny_paths_resolve_symlinks(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            actual = root / "actual"
-            actual.mkdir()
-            link = root / "secrets"
-            link.symlink_to(actual, target_is_directory=True)
-            secret = link / "api-key"
-            with patch.object(bot, "SECRET_PATHS", ()):
-                bot.configure_secret_paths(secret, Path("/run/secrets/api-key"))
-                self.assertIn(str(actual / "api-key"), bot.SECRET_PATHS)
-                self.assertNotIn(str(secret), bot.SECRET_PATHS)
-                self.assertNotIn(str(Path("/run/secrets/api-key").resolve()),
-                                 bot.SECRET_PATHS)
-
     def test_codex_exec_preserves_tools_and_hides_api_key(self):
         events = [
             {"type": "item.completed", "item": {"type": "command_execution",
@@ -284,14 +269,12 @@ class BotTests(unittest.TestCase):
         ]
         result = subprocess.CompletedProcess([], 0,
             "\n".join(json.dumps(event) for event in events), "")
-        with patch.object(bot.subprocess, "run", return_value=result) as run, \
-                patch.object(bot, "SECRET_PATHS", ("/private/api", "/private/forgejo")):
+        with patch.object(bot.subprocess, "run", return_value=result) as run:
             answer, turn, tools = bot.codex_review(
                 "secret", "gpt-6-luna", "Review safely", "PR patch", Path("/checkout"))
         command = run.call_args.args[0]
         self.assertEqual(command[:4], ["codex", "exec", "--json", "--ephemeral"])
-        self.assertIn('permissions.review.extends=":read-only"', command)
-        self.assertIn('permissions.review.filesystem={"/private/api"="deny","/private/forgejo"="deny"}', command)
+        self.assertIn("--dangerously-bypass-approvals-and-sandbox", command)
         self.assertIn("/checkout", command)
         self.assertIn("project_doc_max_bytes=0", command)
         self.assertIn('shell_environment_policy.filters.CODEX_API_KEY="exclude"', command)

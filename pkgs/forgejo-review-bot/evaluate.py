@@ -127,7 +127,6 @@ def main(argv=None):
     bot.configure_audit_prompts(args.audit_prompt_dir)
     if args.models_json is not None:
         configure_models_json(args.models_json)
-    bot.configure_secret_paths(args.openai_key_file, args.forgejo_token_file)
     api_key = read_secret(args.openai_key_file, "OpenAI key")
     forgejo_token = read_secret(args.forgejo_token_file, "Forgejo token")
     output_dir = private_dir(args.output_dir)

@@ -46,18 +46,6 @@ MODEL_RATES = {"gpt-6-luna": (0.1, 0.01, 0.125, 0.5),
 INSTRUCTIONS = None
 AUDIT_PROMPTS = None
 MODELS = None
-SECRET_PATHS = (str(Path("/run/secrets").resolve()),)
-
-
-def configure_secret_paths(*paths):
-    global SECRET_PATHS
-    secret_dir = Path("/run/secrets").resolve()
-    denied = {secret_dir}
-    for path in paths:
-        resolved = Path(path).resolve()
-        if not resolved.is_relative_to(secret_dir):
-            denied.add(resolved)
-    SECRET_PATHS = tuple(sorted(map(str, denied)))
 
 
 def load_prompt_file(path):
@@ -246,13 +234,10 @@ def run_audit(api_key, name, prompt, review, notes=""):
 
 def codex_review(api_key, model, prompt, review, checkout):
     """Run one isolated Codex session and require a completed final answer."""
-    denied = ",".join(json.dumps(path) + '="deny"' for path in SECRET_PATHS)
     command = ["codex", "exec", "--json", "--ephemeral",
+               "--dangerously-bypass-approvals-and-sandbox",
                "--skip-git-repo-check",
                "-C", str(checkout), "-m", model,
-               "-c", 'default_permissions="review"',
-               "-c", 'permissions.review.extends=":read-only"',
-               "-c", "permissions.review.filesystem={" + denied + "}",
                "-c", "project_doc_max_bytes=0",
                "-c", "shell_environment_policy.ignore_default_excludes=false",
                "-c", 'shell_environment_policy.filters.CODEX_API_KEY="exclude"',
@@ -819,7 +804,6 @@ def main():
     configure_audit_prompts(args.audit_prompt_dir)
     secrets = (args.openai_key_file, args.webhook_secret_file,
                args.forgejo_token_file)
-    configure_secret_paths(*secrets)
     api_key = args.openai_key_file.read_text().strip()
     secret = args.webhook_secret_file.read_bytes().strip()
     forgejo_token = args.forgejo_token_file.read_text().strip()
