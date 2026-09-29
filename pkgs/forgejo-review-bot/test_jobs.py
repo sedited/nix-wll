@@ -1,17 +1,13 @@
-import importlib.util
 import sqlite3
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
 
-spec = importlib.util.spec_from_file_location(
-    "jobs", Path(__file__).with_name("forgejo_review_bot") / "jobs.py")
-jobs = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(jobs)
-
+from forgejo_review_bot import jobs
 
 class JobStoreTests(unittest.TestCase):
     def setUp(self):
@@ -24,7 +20,7 @@ class JobStoreTests(unittest.TestCase):
         return self.store.enqueue(42, "master", head, "synchronize", force)
 
     def row(self, job):
-        with sqlite3.connect(self.path) as db:
+        with closing(sqlite3.connect(self.path)) as db:
             db.row_factory = sqlite3.Row
             return dict(db.execute("SELECT * FROM jobs WHERE id = ?",
                                    (job["id"],)).fetchone())

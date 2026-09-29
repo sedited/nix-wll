@@ -3,18 +3,17 @@ import hmac
 import http.client
 import json
 import sqlite3
-import sys
 import tempfile
 import threading
 import unittest
 import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 from forgejo_review_bot import config, forgejo, model, pipeline, repository, service, spend
 from forgejo_review_bot.jobs import JobStore
 
@@ -236,7 +235,7 @@ class ServiceTests(unittest.TestCase):
             with self.assertLogs(level="ERROR"):
                 self.assertEqual(self.process(job), "failed")
         self.assertIsNone(self.jobs.claim())
-        with sqlite3.connect(self.state_dir / "jobs.sqlite3") as db:
+        with closing(sqlite3.connect(self.state_dir / "jobs.sqlite3")) as db:
             self.assertEqual(db.execute("SELECT status FROM jobs WHERE id=?",
                                         (job["id"],)).fetchone()[0], "failed")
 
