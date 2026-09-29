@@ -29,6 +29,10 @@ stdenvNoCC.mkDerivation {
   installPhase = ''
     runHook preInstall
     install -Dm755 bot.py $out/libexec/forgejo-review-bot/bot.py
+    install -Dm755 evaluate.py $out/libexec/forgejo-review-bot/evaluate.py
+    for module in forgejo_review_bot/*.py; do
+      install -Dm644 "$module" $out/libexec/forgejo-review-bot/"$module"
+    done
     install -Dm644 prompt.md $out/libexec/forgejo-review-bot/prompt.md
     install -Dm644 prompt.md $out/share/forgejo-review-bot/prompt.md
     for audit in audits/*.md; do
@@ -39,6 +43,9 @@ stdenvNoCC.mkDerivation {
     install -Dm644 audits/models.json $out/share/forgejo-review-bot/audits/models.json
     makeWrapper ${python3.interpreter} $out/bin/forgejo-review-bot \
       --add-flags $out/libexec/forgejo-review-bot/bot.py \
+      --prefix PATH : ${lib.makeBinPath [ git ]}
+    makeWrapper ${python3.interpreter} $out/bin/forgejo-review-bot-evaluate \
+      --add-flags $out/libexec/forgejo-review-bot/evaluate.py \
       --prefix PATH : ${lib.makeBinPath [ git ]}
     runHook postInstall
   '';

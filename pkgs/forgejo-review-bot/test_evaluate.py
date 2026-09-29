@@ -7,33 +7,27 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import bot
-import evaluate
+from forgejo_review_bot import config, evaluate, forgejo, model, pipeline, repository, trace
 
 
 class EvaluateTests(unittest.TestCase):
     def setUp(self):
-        self.prompts = bot.AUDIT_PROMPTS
-        self.models = bot.MODELS
-        bot.configure(
+        self.bot_config = config.BotConfig(
             "https://git.fish.foo/bitcoin/bitcoin.git",
             "bitcoin/bitcoin",
             "https://git.fish.foo/api/v1/repos/bitcoin/bitcoin",
         )
-
-    def tearDown(self):
-        bot.AUDIT_PROMPTS = self.prompts
-        bot.MODELS = self.models
+        self.prompt_config = config.PromptConfig.load()
 
     def test_replay_writes_private_artifact_without_publishing(self):
         models = {name: "gpt-6.1-sol" if name in ("independent", "adversarial")
-                  else "gpt-6-luna" for name in bot.MODEL_NAMES}
+                  else "gpt-6-luna" for name in config.MODEL_NAMES}
         prompts = {name: f"{name} prompt" for name in
-                   ("common", "adversarial", *bot.AUDIT_NAMES,
+                   ("common", "adversarial", *config.AUDIT_NAMES,
                     "verifier", "collator")}
         calls = []
 
-        def request(token, path, method="GET", data=None):
+        def request(bot_config, token, path, method="GET", data=None):
             calls.append((path, method, data))
             self.assertEqual(method, "GET")
             self.assertIsNone(data)
@@ -44,7 +38,7 @@ class EvaluateTests(unittest.TestCase):
                     "base": {"ref": "master"},
                     "head": {"sha": "d" * 40}}
 
-        def collect(checkout, number, base_ref, expected_head, title, description):
+        def collect(checkout, number, base_ref, expected_head, title, description, bot_config):
             self.assertEqual(checkout, Path("/state/checkout"))
             self.assertEqual(number, 42)
             self.assertEqual(base_ref, "master")
@@ -53,11 +47,12 @@ class EvaluateTests(unittest.TestCase):
             self.assertEqual(description, "Replay the current head.")
             return "b" * 40, "a" * 40, "review input", None
 
-        def review(api_key, review_input, checkout, debug, current_pr,
-                   prompt=None, model=None, tools=None, max_tool_calls=bot.MAX_TOOL_CALLS,
-                   first_tool_required=True, max_output_tokens=bot.MAX_OUTPUT_TOKENS):
+        def review(api_key, review_input, snapshot, bot_config, prompt_config, debug, current_pr,
+                   prompt=None, model=None, tools=None, max_tool_calls=model.MAX_TOOL_CALLS,
+                   first_tool_required=True, max_output_tokens=model.MAX_OUTPUT_TOKENS,
+                   **kwargs):
             self.assertEqual(api_key, "openai-key")
-            self.assertEqual(checkout, Path("/state/checkout"))
+            self.assertEqual(snapshot.checkout, Path("/state/checkout"))
             self.assertEqual(current_pr, 42)
             if prompt is None:
                 self.assertEqual(review_input, "review input")
@@ -67,11 +62,11 @@ class EvaluateTests(unittest.TestCase):
                 return "adversarial output"
             if prompt == "verifier prompt":
                 self.assertIn("independent output", review_input)
-                self.assertEqual(max_output_tokens, bot.MAX_VERIFIER_OUTPUT_TOKENS)
+                self.assertEqual(max_output_tokens, 8_000)
                 return "verifier output"
             self.fail(f"unexpected prompt {prompt!r}")
 
-        def audit(api_key, name, prompt, review_input, notes=""):
+        def audit(api_key, name, prompt, review_input, prompt_config, notes="", on_response=None):
             if name == "collator":
                 self.assertIn("verifier output", review_input)
                 return "final review text", {
@@ -81,26 +76,28 @@ class EvaluateTests(unittest.TestCase):
                 "name": name, "model": "gpt-6-luna",
                 "status": "completed", "output_truncated": False}
 
-        def focused(api_key, name, prompt, review_input, checkout):
+        def focused(api_key, name, prompt, review_input, snapshot, bot_config, prompt_config, on_response=None):
             return f"{name} output", {
                 "name": name, "model": "gpt-6-luna",
                 "status": "completed", "output_truncated": False}
 
         with tempfile.TemporaryDirectory() as directory:
             output_dir = Path(directory) / "artifacts"
-            with patch.object(bot, "forgejo_request", side_effect=request), \
-                    patch.object(bot, "current_head", return_value="a" * 40), \
-                    patch.object(bot, "collect_review", side_effect=collect), \
-                    patch.object(bot, "audit_prompts", return_value=prompts), \
-                    patch.object(bot, "stage_models", return_value=models), \
-                    patch.object(bot, "audit_developer_notes", return_value="notes"), \
-                    patch.object(bot, "openai_review", side_effect=review), \
-                    patch.object(bot, "run_audit", side_effect=audit), \
-                    patch.object(bot, "run_focused_review", side_effect=focused), \
-                    patch.object(bot, "publish_review") as publish:
-                artifact = evaluate.replay_pull_request(
-                    "openai-key", "forgejo-token", Path("/state/checkout"),
-                    evaluate.private_dir(output_dir), 42)
+            with patch.object(forgejo, "forgejo_request", side_effect=request), \
+                    patch.object(repository, "current_head", return_value="a" * 40), \
+                    patch.object(repository, "collect_review", side_effect=collect), \
+                    patch.object(pipeline, "audit_developer_notes", return_value="notes"), \
+                    patch.object(pipeline, "openai_review", side_effect=review), \
+                    patch.object(pipeline, "run_audit", side_effect=audit), \
+                    patch.object(pipeline, "run_focused_review", side_effect=focused), \
+                    patch.object(forgejo, "publish_review") as publish:
+                with patch.object(repository, "snapshot_repository", return_value=repository.RepositorySnapshot(
+                        Path("/state/checkout"), "b" * 40, "a" * 40, "b" * 40,
+                        {}, {}, frozenset())):
+                    artifact = evaluate.replay_pull_request(
+                        "openai-key", "forgejo-token", Path("/state/checkout"),
+                        evaluate.private_dir(output_dir), 42, self.bot_config,
+                        config.PromptConfig("prompt", prompts, models))
 
             publish.assert_not_called()
             self.assertEqual(calls, [("/pulls/42", "GET", None)])
@@ -117,7 +114,7 @@ class EvaluateTests(unittest.TestCase):
         self.assertEqual(data["stage_outputs"]["verifier"], "verifier output")
         self.assertEqual(data["verifier"], "verifier output")
         self.assertEqual(data["stage_outputs"]["collator"], "final review text")
-        for name in bot.AUDIT_NAMES:
+        for name in config.AUDIT_NAMES:
             self.assertEqual(data["stage_outputs"][name], f"{name} output")
         self.assertIn("final review text", data["final_comment"])
         self.assertIn("Head: `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`",
@@ -134,11 +131,11 @@ class EvaluateTests(unittest.TestCase):
             token.write_text("forgejo-token\n", encoding="utf-8")
             prompt.write_text("prompt\n", encoding="utf-8")
             audit_dir.mkdir()
-            for name in ("common", "adversarial", *bot.AUDIT_NAMES,
+            for name in ("common", "adversarial", *config.AUDIT_NAMES,
                          "verifier", "collator"):
                 (audit_dir / f"{name}.md").write_text(f"{name}\n", encoding="utf-8")
             models = {name: "gpt-6.1-sol" if name in ("independent", "adversarial")
-                      else "gpt-6-luna" for name in bot.MODEL_NAMES}
+                      else "gpt-6-luna" for name in config.MODEL_NAMES}
             (audit_dir / "models.json").write_text(json.dumps(models), encoding="utf-8")
             output_dir = root / "out"
             models_override = root / "models-override.json"
@@ -147,8 +144,9 @@ class EvaluateTests(unittest.TestCase):
             models_override.write_text(json.dumps(override), encoding="utf-8")
             seen = []
 
-            def replay(api_key, forgejo_token, checkout, out, number):
-                seen.append((api_key, forgejo_token, checkout, out, number))
+            def replay(api_key, forgejo_token, checkout, out, number, bot_config, prompt_config):
+                seen.append((api_key, forgejo_token, checkout, out, number,
+                             bot_config, prompt_config))
                 return out / f"pr-{number}.json"
 
             stdout = io.StringIO()
@@ -168,11 +166,11 @@ class EvaluateTests(unittest.TestCase):
                     "7", "8",
                 ]), 0)
 
-        self.assertEqual([item[-1] for item in seen], [7, 8])
+        self.assertEqual([item[4] for item in seen], [7, 8])
         self.assertTrue(all(item[0] == "openai-key" for item in seen))
         self.assertTrue(all(item[1] == "forgejo-token" for item in seen))
         self.assertTrue(all(item[2].name == "checkout" for item in seen))
-        self.assertEqual(bot.stage_models()["verifier"], "gpt-6.1-sol")
+        self.assertEqual(seen[0][-1].models["verifier"], "gpt-6.1-sol")
 
 
 if __name__ == "__main__":
