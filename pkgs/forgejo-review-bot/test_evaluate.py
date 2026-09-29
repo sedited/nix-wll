@@ -29,7 +29,7 @@ class EvaluateTests(unittest.TestCase):
         models = {name: "gpt-6.1-sol" if name in ("independent", "adversarial")
                   else "gpt-6-luna" for name in bot.MODEL_NAMES}
         prompts = {name: f"{name} prompt" for name in
-                   ("common", "adversarial", *bot.AUDIT_NAMES,
+                   ("common", "router", "adversarial", *bot.AUDIT_NAMES,
                     "verifier", "collator")}
         calls = []
 
@@ -94,6 +94,7 @@ class EvaluateTests(unittest.TestCase):
                     patch.object(bot, "codex_stage_review", side_effect=review), \
                     patch.object(bot, "run_audit", side_effect=audit), \
                     patch.object(bot, "run_focused_review", side_effect=focused), \
+                    patch.object(bot, "route_adversarial", return_value=True), \
                     patch.object(bot, "publish_review") as publish:
                 artifact = evaluate.replay_pull_request(
                     "openai-key", "forgejo-token", Path("/state/checkout"),
@@ -131,7 +132,7 @@ class EvaluateTests(unittest.TestCase):
             token.write_text("forgejo-token\n", encoding="utf-8")
             prompt.write_text("prompt\n", encoding="utf-8")
             audit_dir.mkdir()
-            for name in ("common", "adversarial", *bot.AUDIT_NAMES,
+            for name in ("common", "router", "adversarial", *bot.AUDIT_NAMES,
                          "verifier", "collator"):
                 (audit_dir / f"{name}.md").write_text(f"{name}\n", encoding="utf-8")
             models = {name: "gpt-6.1-sol" if name in ("independent", "adversarial")

@@ -40,7 +40,8 @@ DEFAULT_PROMPT_FILE = Path(__file__).with_name("prompt.md")
 DEFAULT_AUDIT_DIR = Path(__file__).with_name("audits")
 AUDIT_NAMES = ("state", "public_contract", "tests", "developer_notes", "design")
 TOOLED_AUDITS = ("tests", "design")
-MODEL_NAMES = ("independent", "adversarial", *AUDIT_NAMES, "verifier", "collator")
+MODEL_NAMES = ("independent", "router", "adversarial", *AUDIT_NAMES,
+               "verifier", "collator")
 MODEL_RATES = {"gpt-6-luna": (0.1, 0.01, 0.125, 0.5),
                "gpt-6.1-sol": (2, 0.1, 2.5, 10)}
 INSTRUCTIONS = None
@@ -66,7 +67,7 @@ def instructions():
 def configure_audit_prompts(directory):
     global AUDIT_PROMPTS, MODELS
     prompts = {name: load_prompt_file(directory / f"{name}.md")
-               for name in ("common", "adversarial", *AUDIT_NAMES,
+               for name in ("common", "router", "adversarial", *AUDIT_NAMES,
                             "verifier", "collator")}
     if any(not prompt.strip() for prompt in prompts.values()):
         raise ValueError("audit prompt files must not be empty")
@@ -382,6 +383,48 @@ def run_audits(api_key, review, checkout, debug):
     return "Focused Luna reviews:\n" + "\n\n".join(results)
 
 
+def route_adversarial(api_key, review, checkout, sol_review, debug):
+    """Skip Sol only when the complete change and all preliminary reviews look safe."""
+    reason = None
+    if "Patch exceeds" in review:
+        reason = "patch omitted"
+    elif (len(debug.get("audits", [])) != len(AUDIT_NAMES)
+          or any(audit.get("status") != "completed"
+                 for audit in debug["audits"])):
+        reason = "audit unavailable"
+    elif any(name not in debug.get("stage_outputs", {}) for name in AUDIT_NAMES):
+        reason = "audit output unavailable"
+    elif (sol_review.strip() != "No candidate finding."
+          or any(output.strip() != "No candidate finding."
+                 for output in debug["stage_outputs"].values())):
+        reason = "candidate finding"
+    else:
+        try:
+            base = git(checkout, "merge-base", "refs/review-bot/base", "HEAD").strip()
+            paths = [path for path in git(checkout, "diff", "--name-only", "-z",
+                                          f"{base}..HEAD").split("\x00") if path]
+            if not paths:
+                reason = "no changed paths"
+            elif any(path.startswith(("src/net", "src/validation", "src/consensus/",
+                                      "src/txmempool", "src/kernel/", "src/policy/",
+                                      "src/script/", "src/primitives/")) for path in paths):
+                reason = "critical code path"
+            else:
+                answer, record = run_audit(
+                    api_key, "router", audit_prompts()["router"],
+                    review + "\n\nChanged paths:\n" + "\n".join(paths))
+                debug["router"] = record
+                debug["stage_outputs"]["router"] = answer
+                if answer.strip() != "SKIP":
+                    reason = "router did not approve skip"
+        except Exception as exc:
+            reason = f"router unavailable ({type(exc).__name__})"
+    decision = "run" if reason else "skip"
+    debug["adversarial_route"] = {"decision": decision, "reason": reason or "low risk"}
+    logging.info("adversarial route decision=%s reason=%s", decision, reason or "low risk")
+    return reason is not None
+
+
 def codex_stage_review(api_key, review, checkout, debug=None, prompt=None,
                        model=None, stage="independent"):
     prompt = instructions() if prompt is None else prompt
@@ -402,17 +445,19 @@ def review_with_independent_passes(api_key, review, checkout, debug):
     sol_debug = {}
     adversarial_debug = {}
     debug["adversarial"] = adversarial_debug
-    with ThreadPoolExecutor(max_workers=3) as pool:
+    with ThreadPoolExecutor(max_workers=2) as pool:
         audits_future = pool.submit(run_audits, api_key, review, checkout, debug)
         sol_future = pool.submit(codex_stage_review, api_key, review, checkout,
                                  sol_debug)
-        adversarial_future = pool.submit(
-            codex_stage_review, api_key, review, checkout, adversarial_debug,
+        sol_review = sol_future.result()
+        luna_reviews = audits_future.result()
+    if route_adversarial(api_key, review, checkout, sol_review, debug):
+        adversarial_review = codex_stage_review(
+            api_key, review, checkout, adversarial_debug,
             prompt=audit_prompts()["adversarial"], model=stage_models()["adversarial"],
             stage="adversarial")
-        sol_review = sol_future.result()
-        adversarial_review = adversarial_future.result()
-        luna_reviews = audits_future.result()
+    else:
+        adversarial_review = "Skipped: low-risk change with no preliminary findings."
     debug.update(sol_debug)
     stage_outputs = debug.setdefault("stage_outputs", {})
     stage_outputs["independent"] = sol_review
@@ -521,6 +566,10 @@ def review_metrics(debug):
              for turn in independent_turns]
     calls += [(turn, MODEL_RATES.get(models["adversarial"]))
               for turn in adversarial_turns]
+    router = debug.get("router")
+    if router and isinstance(router.get("input_tokens"), int) \
+            and isinstance(router.get("output_tokens"), int):
+        calls.append((router, MODEL_RATES.get(router.get("model", models["router"]))))
     calls += [(turn, MODEL_RATES.get(models["verifier"]))
               for turn in verifier_turns]
     calls += [(audit, MODEL_RATES.get(audit.get("model", models[audit["name"]])))
@@ -538,7 +587,7 @@ def review_metrics(debug):
     metrics = {"model_turns": len(turns),
                "tool_calls": len(tools) + sum(audit.get("tool_calls", 0)
                                               for audit in audits),
-               "audit_calls": len(audits),
+               "audit_calls": len(audits) + bool(router),
                "estimated_cost_usd": None, "total_input_tokens": None,
                "total_output_tokens": None, "total_model_seconds": None}
     if known_usage and calls:
@@ -571,6 +620,8 @@ def review_trace(debug):
              "input": "PR text, patch, and commits omitted from public debug output",
              "turns": debug.get("turns", []), "tools": debug.get("tools", []),
              "adversarial": debug.get("adversarial", {}),
+             "adversarial_route": debug.get("adversarial_route"),
+             "router": debug.get("router"),
              "audits": debug.get("audits", []),
              "verification": debug.get("verification", {}),
              "collator": debug.get("collator")}

@@ -4,6 +4,7 @@
   "design": "gpt-6-luna",
   "developer_notes": "gpt-6-luna",
   "independent": "gpt-6-luna",
+  "router": "gpt-6-luna",
   "public_contract": "gpt-6-luna",
   "state": "gpt-6-luna",
   "tests": "gpt-6-luna",

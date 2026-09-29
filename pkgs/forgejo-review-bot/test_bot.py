@@ -68,7 +68,7 @@ class BotTests(unittest.TestCase):
     def test_model_config_requires_adversarial_stage_and_prompt(self):
         with tempfile.TemporaryDirectory() as directory:
             audit_dir = Path(directory)
-            for name in ("common", "adversarial", *bot.AUDIT_NAMES,
+            for name in ("common", "router", "adversarial", *bot.AUDIT_NAMES,
                          "verifier", "collator"):
                 (audit_dir / f"{name}.md").write_text(f"{name} instructions\n")
             models = {name: "gpt-6.1-sol" if name in
@@ -504,7 +504,7 @@ class BotTests(unittest.TestCase):
 
     def test_six_independent_reviews_reach_verifier_and_collator(self):
         calls = []
-        parallel_stage = threading.Barrier(3, timeout=3)
+        parallel_stage = threading.Barrier(2, timeout=3)
         candidates = ["Independent finding", "Adversarial finding",
                       *(f"{name} finding" for name in bot.AUDIT_NAMES)]
 
@@ -526,7 +526,6 @@ class BotTests(unittest.TestCase):
             if prompt == "Adversarial prompt":
                 self.assertEqual(review, "Original PR input")
                 self.assertEqual(model, "gpt-6.1-sol")
-                parallel_stage.wait()
                 return "Adversarial finding"
             self.assertEqual(prompt, bot.audit_prompts()["verifier"])
             self.assertEqual(model, "gpt-6-luna")
@@ -550,6 +549,7 @@ class BotTests(unittest.TestCase):
         with patch.object(bot, "run_audits", side_effect=audit), \
                 patch.object(bot, "codex_stage_review", side_effect=model), \
                 patch.object(bot, "run_audit", side_effect=collate), \
+                patch.object(bot, "route_adversarial", return_value=True), \
                 patch.object(bot, "audit_prompts", return_value={
                     "adversarial": "Adversarial prompt", "verifier": "Verifier prompt",
                     "collator": "Collator prompt"}):
@@ -566,6 +566,84 @@ class BotTests(unittest.TestCase):
         self.assertEqual(debug["stage_outputs"]["independent"], "Independent finding")
         self.assertEqual(debug["stage_outputs"]["verifier"],
                          "ACCEPT Independent finding; ACCEPT Adversarial finding")
+
+    def test_router_skips_only_clean_low_risk_changes(self):
+        debug = {"audits": [{"status": "completed"} for _ in bot.AUDIT_NAMES],
+                 "stage_outputs": {name: "No candidate finding."
+                                   for name in bot.AUDIT_NAMES}}
+        record = {"name": "router", "model": "gpt-6-luna", "status": "completed",
+                  "input_tokens": 10, "cached_tokens": 0,
+                  "cache_write_tokens": 0, "output_tokens": 1,
+                  "elapsed_seconds": 0.1}
+        with patch.object(bot, "git", side_effect=["b" * 40 + "\n", "doc/README.md\x00"]), \
+                patch.object(bot, "audit_prompts", return_value={"router": "Route"}), \
+                patch.object(bot, "run_audit", return_value=("SKIP", record)) as route:
+            self.assertFalse(bot.route_adversarial(
+                "key", "Patch:\ndiff --git a/doc/README.md b/doc/README.md",
+                Path("/unused"), "No candidate finding.", debug))
+        route.assert_called_once()
+        self.assertEqual(debug["adversarial_route"]["decision"], "skip")
+        self.assertEqual(debug["router"]["name"], "router")
+        self.assertEqual(bot.review_metrics(debug)["audit_calls"], 6)
+
+    def test_router_runs_for_critical_paths_and_preliminary_findings(self):
+        debug = {"audits": [{"status": "completed"} for _ in bot.AUDIT_NAMES],
+                 "stage_outputs": {name: "No candidate finding."
+                                   for name in bot.AUDIT_NAMES}}
+        with patch.object(bot, "git", side_effect=["b" * 40 + "\n",
+                                                   "src/validation.cpp\x00"]), \
+                patch.object(bot, "run_audit") as route:
+            self.assertTrue(bot.route_adversarial(
+                "key", "Patch:\nvalidation change", Path("/unused"),
+                "No candidate finding.", debug))
+        route.assert_not_called()
+        self.assertEqual(debug["adversarial_route"]["reason"], "critical code path")
+        debug["stage_outputs"]["state"] = "Possible state bug"
+        with patch.object(bot, "git") as git:
+            self.assertTrue(bot.route_adversarial(
+                "key", "Patch:\ndoc change", Path("/unused"),
+                "No candidate finding.", debug))
+        git.assert_not_called()
+
+    def test_router_fails_closed_on_incomplete_input_or_answer(self):
+        debug = {"audits": [{"status": "completed"} for _ in bot.AUDIT_NAMES],
+                 "stage_outputs": {name: "No candidate finding."
+                                   for name in bot.AUDIT_NAMES}}
+        with patch.object(bot, "git") as git:
+            self.assertTrue(bot.route_adversarial(
+                "key", "Patch exceeds 200000 input bytes.", Path("/unused"),
+                "No candidate finding.", debug))
+        git.assert_not_called()
+        with patch.object(bot, "git", side_effect=["b" * 40 + "\n", "doc/README.md\x00"]), \
+                patch.object(bot, "audit_prompts", return_value={"router": "Route"}), \
+                patch.object(bot, "run_audit", return_value=("Probably skip", {})):
+            self.assertTrue(bot.route_adversarial(
+                "key", "Patch:\ndoc change", Path("/unused"),
+                "No candidate finding.", debug))
+        self.assertEqual(debug["adversarial_route"]["decision"], "run")
+
+    def test_low_risk_route_omits_adversarial_stage(self):
+        calls = []
+
+        def review(api_key, review_input, checkout, debug, prompt=None,
+                   model=None, stage="independent"):
+            calls.append(stage)
+            return "No candidate finding."
+
+        with patch.object(bot, "run_audits", return_value="Focused reviews"), \
+                patch.object(bot, "route_adversarial", return_value=False), \
+                patch.object(bot, "codex_stage_review", side_effect=review), \
+                patch.object(bot, "run_audit", return_value=(
+                    "No candidate finding.", {"status": "completed",
+                                              "output_truncated": False})), \
+                patch.object(bot, "audit_prompts", return_value={
+                    "verifier": "Verifier prompt", "collator": "Collator prompt"}):
+            debug = {}
+            bot.review_with_independent_passes("key", "PR input", Path("/unused"),
+                                               debug)
+        self.assertEqual(calls, ["independent", "verifier"])
+        self.assertEqual(debug["adversarial"], {})
+        self.assertIn("Skipped:", debug["stage_outputs"]["adversarial"])
 
     def test_incomplete_collation_prevents_publication(self):
         debug = {}
