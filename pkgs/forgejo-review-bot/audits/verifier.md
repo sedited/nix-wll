@@ -34,12 +34,18 @@ candidate ID exactly once, grouping IDs only when the claims share a root
 cause. Use `publish`, `drop`, or `unresolved` and ground each reason in code.
 For a published defect, verify its trigger and consequence. For a published
 suggestion, verify the present cost, concrete alternative, and why it preserves
-required behavior. A published finding needs a concise title and body grounded
-in the checkout. Use unresolved when the checkout cannot settle a material
-claim. Do not publish a finding solely because it sounds plausible or appears
-in several reviews. Preserve independent minor findings that survive
-verification. An independently verified new issue may be published with an
-empty candidate ID list. If nothing can be published, still return a decision
-for every supplied ID, using `drop` or `unresolved` as appropriate. This is a
-verifier report for another model, not a public comment; do not add decorative
-language, an ACK, or a merge verdict.
+required behavior. A published finding must point to a changed file and a
+source line on the correct side of the diff (head for added or changed code,
+base for removed code). Verify that the path and line match the claim. Evidence
+from unchanged policy or documentation belongs in the body; anchor the finding
+to the relevant changed code. Use unresolved when the checkout cannot settle a
+material claim, and state the specific evidence still needed. Do not let an
+inspection limit erase supported findings or mark the review partial by
+default; absence of build, test, or sanitizer execution is expected in static
+review and is not itself a limitation. Do not publish a finding solely because
+it sounds plausible or appears in several reviews. Preserve independent minor
+findings that survive verification. An independently verified new issue may be
+published with an empty candidate ID list. If nothing can be published, still
+return a decision for every supplied ID, using `drop` or `unresolved` as
+appropriate. This is a verifier report for another model, not a public
+comment; do not add decorative language, an ACK, or a merge verdict.

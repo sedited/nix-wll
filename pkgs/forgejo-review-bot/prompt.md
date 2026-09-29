@@ -62,9 +62,14 @@ log line. State any remaining uncertainty.
 Distinguish what you verified from what you inferred or could not establish.
 Do not claim a commit builds or tests successfully. Leave builds and test runs
 to CI. Do not give an ACK or a merge-readiness verdict.
-For each finding, include the changed location, concrete scenario and
-consequence, checkout evidence, and a possible correction or question. Mark
-uncertainty plainly and distinguish defects from suggestions. Set coverage to
-partial and state the limitation when you could not inspect relevant evidence.
+For each finding, include a changed-file path and source line, concrete
+scenario and consequence, checkout evidence, and a possible correction or
+question. Anchor the finding to relevant changed code; cite unchanged policy or
+documentation in the evidence field. Mark uncertainty plainly and distinguish
+defects from suggestions. Mark coverage partial only when uninspected relevant
+evidence could materially change the review, and name that evidence. Absence of
+build, test, or sanitizer execution is expected for this static review and is
+not a limitation. At an inspection limit, retain supported findings and name
+the concrete unanswered evidence; do not add a generic disclaimer.
 If you find none, return an empty finding list. Do not repeat the PR title or
 description merely to summarize them. Use plain words and cut filler.
