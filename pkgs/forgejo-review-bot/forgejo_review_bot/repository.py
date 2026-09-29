@@ -283,7 +283,7 @@ def snapshot_repository(checkout, base_sha, head_sha):
     merge_base = git(checkout, "merge-base", base_sha, head_sha).strip()
     head_files = MappingProxyType(tracked_files_at(checkout, head_sha))
     base_files = MappingProxyType(tracked_files_at(checkout, merge_base))
-    changed = git(checkout, "diff", "--no-ext-diff", "--name-only", "-z",
+    changed = git(checkout, "diff", "--no-ext-diff", "--no-renames", "--name-only", "-z",
                   f"{merge_base}..{head_sha}")
     return RepositorySnapshot(checkout, base_sha, head_sha, merge_base,
                               head_files, base_files,

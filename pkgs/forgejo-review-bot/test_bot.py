@@ -613,6 +613,25 @@ class BotTests(unittest.TestCase):
                                                    "link.cpp", 1))
 
 
+    def test_snapshot_retains_both_paths_of_a_rename(self):
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = Path(directory)
+            repository.git(checkout, "init", "-q")
+            (checkout / "before.cpp").write_text("unchanged content\n")
+            repository.git(checkout, "add", ".")
+            commit = ("-c", "user.name=Test", "-c", "user.email=test@example.com",
+                      "commit", "-qm")
+            repository.git(checkout, *commit, "base")
+            base = repository.git(checkout, "rev-parse", "HEAD").strip()
+            repository.git(checkout, "mv", "before.cpp", "after.cpp")
+            repository.git(checkout, *commit, "rename")
+            head = repository.git(checkout, "rev-parse", "HEAD").strip()
+
+            snapshot = repository.snapshot_repository(checkout, base, head)
+            self.assertEqual(snapshot.changed_paths, {"before.cpp", "after.cpp"})
+            self.assertIn("before.cpp", snapshot.base_files)
+            self.assertIn("after.cpp", snapshot.head_files)
+
     def test_publish_creates_then_edits_one_bot_comment(self):
         comments = [{"id": 1, "user": {"login": "someone-else"},
                      "body": "Unrelated comment"}]
