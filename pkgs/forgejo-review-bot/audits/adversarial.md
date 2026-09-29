@@ -11,6 +11,10 @@ control through validation, limits, locks, persistence, and error handling.
 Where relevant, look for new ways to cause consensus disagreement, acceptance
 of invalid data, crashes, resource exhaustion, privacy loss, or loss of funds.
 Also consider changed invariants that can fail without an attacker.
+For a path that now continues after an earlier exit, bound its extra work under
+the relevant input limits and locks. For changed filters or retry tracking,
+test repeated inputs, cache expiry, and state changes that make a later retry
+valid.
 
 Use find_paths, read_file, read_base_file, read_diff, and search_code to follow
 the affected paths. Compare the merge base with the PR head so you do not
