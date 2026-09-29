@@ -53,12 +53,10 @@ class EvaluateTests(unittest.TestCase):
             self.assertEqual(description, "Replay the current head.")
             return "b" * 40, "a" * 40, "review input", None
 
-        def review(api_key, review_input, checkout, debug, current_pr,
-                   prompt=None, model=None, tools=None, max_tool_calls=bot.MAX_TOOL_CALLS,
-                   first_tool_required=True, max_output_tokens=bot.MAX_OUTPUT_TOKENS):
+        def review(api_key, review_input, checkout, debug,
+                   prompt=None, model=None):
             self.assertEqual(api_key, "openai-key")
             self.assertEqual(checkout, Path("/state/checkout"))
-            self.assertEqual(current_pr, 42)
             if prompt is None:
                 self.assertEqual(review_input, "review input")
                 return "independent output"
@@ -67,7 +65,6 @@ class EvaluateTests(unittest.TestCase):
                 return "adversarial output"
             if prompt == "verifier prompt":
                 self.assertIn("independent output", review_input)
-                self.assertEqual(max_output_tokens, bot.MAX_VERIFIER_OUTPUT_TOKENS)
                 return "verifier output"
             self.fail(f"unexpected prompt {prompt!r}")
 
@@ -94,7 +91,7 @@ class EvaluateTests(unittest.TestCase):
                     patch.object(bot, "audit_prompts", return_value=prompts), \
                     patch.object(bot, "stage_models", return_value=models), \
                     patch.object(bot, "audit_developer_notes", return_value="notes"), \
-                    patch.object(bot, "openai_review", side_effect=review), \
+                    patch.object(bot, "codex_stage_review", side_effect=review), \
                     patch.object(bot, "run_audit", side_effect=audit), \
                     patch.object(bot, "run_focused_review", side_effect=focused), \
                     patch.object(bot, "publish_review") as publish:

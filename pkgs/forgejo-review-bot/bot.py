@@ -11,6 +11,7 @@ import os
 import queue
 import re
 import subprocess
+import tempfile
 import threading
 import time
 import urllib.error
@@ -28,23 +29,11 @@ REPOSITORY_URL = None
 COMMENT_MARKER = None
 MAX_BODY = 1024 * 1024
 MAX_REVIEW_BYTES = 200_000
-MAX_FILE_BYTES = 1_000_000
-MAX_TOOL_BYTES = 12_000
-MAX_TOOL_CALLS = 24
-MAX_FOCUSED_TOOL_CALLS = 6
 MAX_FOCUSED_DIFF_BYTES = 80_000
-MAX_MODEL_TURNS = 10
-MAX_OUTPUT_TOKENS = 6_000
-MAX_VERIFIER_OUTPUT_TOKENS = 8_000
-MAX_AUDIT_OUTPUT_TOKENS = 4_000
 MAX_AUDIT_OUTPUT_BYTES = 4_000
-MAX_COLLATOR_OUTPUT_TOKENS = 6_000
 MAX_COLLATOR_OUTPUT_BYTES = 10_000
 MAX_PUBLIC_STAGE_OUTPUT_BYTES = 4_000
 MAX_AUDIT_DOC_BYTES = 100_000
-MAX_DISCUSSION_RESPONSE_BYTES = 500_000
-MAX_CONTEXT_CALLS = 4
-MAX_HISTORY_CALLS = 4
 SHA = re.compile(r"^[0-9a-f]{40}$")
 BRANCH = re.compile(r"^[A-Za-z0-9._/-]+$")
 DEFAULT_PROMPT_FILE = Path(__file__).with_name("prompt.md")
@@ -57,71 +46,14 @@ MODEL_RATES = {"gpt-6-luna": (0.1, 0.01, 0.125, 0.5),
 INSTRUCTIONS = None
 AUDIT_PROMPTS = None
 MODELS = None
-TOOLS = [
-    {"type": "function", "name": "find_paths", "strict": True,
-     "description": "Find tracked file paths at the PR head containing a case-insensitive "
-                    "substring. Use when you do not know a file's exact path.",
-     "parameters": {"type": "object", "properties": {
-         "query": {"type": "string", "description": "Filename or path substring"}},
-         "required": ["query"], "additionalProperties": False}},
-    {"type": "function", "name": "read_file", "strict": True,
-     "description": "Read numbered lines from a tracked text file at the PR head. "
-                    "Use another call for later lines.",
-     "parameters": {"type": "object", "properties": {
-         "path": {"type": "string", "description": "Repository-relative file path"},
-         "start_line": {"type": "integer", "description": "First line, starting at 1"}},
-         "required": ["path", "start_line"], "additionalProperties": False}},
-    {"type": "function", "name": "read_base_file", "strict": True,
-     "description": "Read numbered lines from a tracked text file at the PR merge base. "
-                    "Use to compare behavior before the PR.",
-     "parameters": {"type": "object", "properties": {
-         "path": {"type": "string", "description": "Repository-relative file path at the merge base"},
-         "start_line": {"type": "integer", "description": "First line, starting at 1"}},
-         "required": ["path", "start_line"], "additionalProperties": False}},
-    {"type": "function", "name": "read_diff", "strict": True,
-     "description": "Read numbered lines from one changed file's PR diff. "
-                    "Use for large patches or to revisit a specific change. "
-                    "Line numbers count lines in the diff, not the source file.",
-     "parameters": {"type": "object", "properties": {
-         "path": {"type": "string", "description": "Changed repository-relative file path"},
-         "start_line": {"type": "integer", "description": "First diff line, starting at 1"}},
-         "required": ["path", "start_line"], "additionalProperties": False}},
-    {"type": "function", "name": "search_code", "strict": True,
-     "description": "Search tracked text files at the PR head for a literal string. "
-                    "Use to find definitions, callers, tests, and conventions.",
-     "parameters": {"type": "object", "properties": {
-         "query": {"type": "string", "description": "Literal code or path fragment"}},
-         "required": ["query"], "additionalProperties": False}},
-    {"type": "function", "name": "search_discussions", "strict": True,
-     "description": "Search this repository's other issues and PRs for a specific "
-                    "term. The current PR is excluded. Open a relevant result "
-                    "with read_discussion.",
-     "parameters": {"type": "object", "properties": {
-         "query": {"type": "string", "description": "Specific term or phrase"}},
-         "required": ["query"], "additionalProperties": False}},
-    {"type": "function", "name": "read_discussion", "strict": True,
-     "description": "Read another same-repository issue or PR by number, "
-                    "including its title, description, and a small sample of "
-                    "ordinary comments. The current PR is excluded.",
-     "parameters": {"type": "object", "properties": {
-         "number": {"type": "integer", "description": "Issue or PR number"}},
-         "required": ["number"], "additionalProperties": False}},
-    {"type": "function", "name": "blame_base", "strict": True,
-     "description": "Trace up to 20 lines of an existing tracked file at the PR merge "
-                    "base to the last commits that changed them.",
-     "parameters": {"type": "object", "properties": {
-         "path": {"type": "string", "description": "Repository-relative file path"},
-         "start_line": {"type": "integer", "description": "First line, starting at 1"}},
-         "required": ["path", "start_line"], "additionalProperties": False}},
-    {"type": "function", "name": "read_commit", "strict": True,
-     "description": "Read an ancestor commit's message and bounded diff for one "
-                    "tracked file at the PR merge base.",
-     "parameters": {"type": "object", "properties": {
-         "commit": {"type": "string", "description": "Full commit SHA from blame_base"},
-         "path": {"type": "string", "description": "Repository-relative file path"}},
-         "required": ["commit", "path"], "additionalProperties": False}},
-]
-FOCUSED_TOOLS = TOOLS[:5]
+SECRET_PATHS = ("/run/secrets",)
+
+
+def configure_secret_paths(*paths):
+    global SECRET_PATHS
+    SECRET_PATHS = tuple(sorted({"/run/secrets",
+                                 *(str(path.absolute()) for path in paths),
+                                 *(str(path.resolve()) for path in paths)}))
 
 
 def load_prompt_file(path):
@@ -273,184 +205,11 @@ def collect_review(checkout, number, base_ref, expected_head, title, description
         changed = git(checkout, "diff", "--no-ext-diff", "--name-status",
                       f"{merge_base}..{actual_head}")
         review = (f"{prelude}Patch exceeds {MAX_REVIEW_BYTES} input bytes. "
-                  "Use read_diff to inspect changed files.\nChanged files:\n"
+                  "Inspect the checkout diff for changed files.\nChanged files:\n"
                   f"{changed}")
         if len(review.encode()) > MAX_REVIEW_BYTES:
             return base_sha, actual_head, None, f"Review input exceeds {MAX_REVIEW_BYTES} bytes"
     return base_sha, actual_head, review, None
-
-
-def tracked_files(checkout):
-    """Map tracked regular paths to their checked-out Git blob IDs."""
-    return tracked_files_at(checkout, "HEAD")
-
-
-def tracked_files_at(checkout, ref):
-    entries = git(checkout, "ls-tree", "-r", "-z", "--full-tree", ref).split("\x00")
-    files = {}
-    for entry in entries:
-        if not entry:
-            continue
-        metadata, path = entry.split("\t", 1)
-        mode, kind, blob = metadata.split()
-        if kind == "blob" and mode in {"100644", "100755"}:
-            files[path] = blob
-    return files
-
-
-def find_paths(files, query):
-    if (not isinstance(query, str) or not 1 <= len(query) <= 100
-            or "\n" in query or "\r" in query or "\x00" in query):
-        return "Path query must be 1 to 100 characters on one line."
-    result = ""
-    for path in files:
-        if query.casefold() not in path.casefold():
-            continue
-        line = f"{path}\n"
-        if len((result + line).encode()) > MAX_TOOL_BYTES:
-            return result + "[Results truncated]"
-        result += line
-    return result or "No matching tracked files."
-
-
-def read_file(checkout, files, path, start_line):
-    if (not isinstance(path, str) or path not in files
-            or not isinstance(start_line, int) or isinstance(start_line, bool)
-            or start_line < 1):
-        return "Invalid path or line. Only tracked regular files can be read."
-    size = int(git(checkout, "cat-file", "-s", files[path]).strip())
-    if size > MAX_FILE_BYTES:
-        return f"File exceeds {MAX_FILE_BYTES} bytes."
-    content = subprocess.run(
-        ["git", "-C", str(checkout), "cat-file", "blob", files[path]],
-        check=True, capture_output=True, timeout=30,
-    ).stdout.decode(errors="replace")
-    if "\x00" in content:
-        return "Binary file cannot be read as text."
-    lines = content.splitlines()
-    if start_line > len(lines):
-        return f"{path} has {len(lines)} lines."
-    result = f"{path} ({len(lines)} lines):\n"
-    for number in range(start_line, min(start_line + 150, len(lines) + 1)):
-        line = f"{number}: {lines[number - 1]}\n"
-        if len((result + line).encode()) > MAX_TOOL_BYTES:
-            break
-        result += line
-    return result
-
-
-def read_diff(checkout, changed_paths, base, path, start_line):
-    if (not isinstance(path, str) or path not in changed_paths
-            or not isinstance(start_line, int) or isinstance(start_line, bool)
-            or not 1 <= start_line <= 100_000):
-        return "Invalid changed path or diff line."
-    process = subprocess.Popen(
-        ["git", "-C", str(checkout), "diff", "--no-ext-diff", "--no-color",
-         f"{base}..HEAD", "--", path],
-        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
-    )
-    result = f"{path} (diff lines from {start_line}):\n"
-    found = False
-    stopped_early = False
-    try:
-        for number, line in enumerate(process.stdout, 1):
-            if number < start_line:
-                continue
-            found = True
-            item = f"{number}: {line}"
-            if len((result + item).encode()) > MAX_TOOL_BYTES:
-                result += f"[Diff line {number} exceeds output limit; continue at {number + 1}]\n"
-                stopped_early = True
-                break
-            result += item
-            if number >= start_line + 149:
-                stopped_early = True
-                break
-    finally:
-        if stopped_early and process.poll() is None:
-            process.kill()
-        process.wait(timeout=10)
-        process.stdout.close()
-    if not stopped_early and process.returncode:
-        raise subprocess.CalledProcessError(process.returncode, process.args)
-    return result if found else result + "No diff lines."
-
-
-def search_code(checkout, query):
-    if (not isinstance(query, str) or not 3 <= len(query) <= 100
-            or "\n" in query or "\r" in query or "\x00" in query):
-        return "Search query must be 3 to 100 characters on one line."
-    process = subprocess.Popen(
-        ["git", "-C", str(checkout), "grep", "-n", "-I", "-F", "-e", query,
-         "HEAD", "--"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-    )
-    try:
-        output = process.stdout.read(MAX_TOOL_BYTES + 1)
-    finally:
-        if process.poll() is None:
-            process.kill()
-        process.wait(timeout=10)
-        process.stdout.close()
-    if not output:
-        return "No matches in tracked text files."
-    return output[:MAX_TOOL_BYTES].decode(errors="replace") + (
-        "\n[Results truncated]" if len(output) > MAX_TOOL_BYTES else "")
-
-
-def blame_base(checkout, base_files, base, path, start_line):
-    if (not isinstance(path, str) or path not in base_files
-            or not isinstance(start_line, int) or isinstance(start_line, bool)
-            or not 1 <= start_line <= 100_000):
-        return "Invalid path or line at the PR merge base."
-    try:
-        output = git(checkout, "blame", "--no-progress", "--line-porcelain",
-                     "-L", f"{start_line},+20", base, "--", path)
-    except subprocess.CalledProcessError:
-        return "No lines at that location in the PR merge base."
-    summaries = {}
-    lines = []
-    current = None
-    for line in output.splitlines():
-        header = re.match(r"^([0-9a-f]{40}) \d+ (\d+)(?: \d+)?$", line)
-        if header:
-            current = (header.group(1), int(header.group(2)))
-        elif line.startswith("summary ") and current:
-            summaries[current[0]] = line[8:]
-        elif line.startswith("\t") and current:
-            lines.append((current[0], current[1], line[1:]))
-    result = f"{path} at merge base {base}:\n"
-    for commit, number, content in lines:
-        item = f"{number}: {commit} {summaries.get(commit, '')}: {content}\n"
-        if len((result + item).encode()) > MAX_TOOL_BYTES:
-            return result + "[Results truncated]"
-        result += item
-    return result if lines else "No blame results."
-
-
-def read_commit(checkout, base_files, base, commit, path):
-    if (not isinstance(commit, str) or not SHA.fullmatch(commit)
-            or not isinstance(path, str) or path not in base_files):
-        return "Invalid commit or path at the PR merge base."
-    ancestor = subprocess.run(
-        ["git", "-C", str(checkout), "merge-base", "--is-ancestor", commit, base],
-        capture_output=True, timeout=30,
-    )
-    if ancestor.returncode:
-        return "Commit is not an ancestor of the PR merge base."
-    process = subprocess.Popen(
-        ["git", "-C", str(checkout), "show", "--format=fuller",
-         "--no-ext-diff", "--no-color", commit, "--", path],
-        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-    )
-    try:
-        output = process.stdout.read(MAX_TOOL_BYTES + 1)
-    finally:
-        if process.poll() is None:
-            process.kill()
-        process.wait(timeout=10)
-        process.stdout.close()
-    return output[:MAX_TOOL_BYTES].decode(errors="replace") + (
-        "\n[Commit output truncated]" if len(output) > MAX_TOOL_BYTES else "")
 
 
 def audit_developer_notes(checkout):
@@ -466,58 +225,81 @@ def audit_developer_notes(checkout):
 
 def run_audit(api_key, name, prompt, review, notes=""):
     model = stage_models()[name]
-    output_tokens = (MAX_COLLATOR_OUTPUT_TOKENS if name == "collator"
-                     else MAX_AUDIT_OUTPUT_TOKENS)
     output_bytes = (MAX_COLLATOR_OUTPUT_BYTES if name == "collator"
                     else MAX_AUDIT_OUTPUT_BYTES)
     input_text = review + ("\n\nMerge-base doc/developer-notes.md:\n" + notes
                            if name == "developer_notes" else "")
-    payload = json.dumps({"model": model, "store": False,
-                          "reasoning": {"effort": "low"},
-                          "instructions": prompt, "input": [
-                              {"role": "user", "content": input_text}],
-                          "max_output_tokens": output_tokens}).encode()
-    request = urllib.request.Request(
-        "https://api.openai.com/v1/responses", data=payload,
-        headers={"Authorization": f"Bearer {api_key}",
-                 "Content-Type": "application/json"}, method="POST",
-    )
-    started = time.monotonic()
-    with urllib.request.urlopen(request, timeout=180) as response:
-        result = json.load(response)
-    output = result.get("output", [])
-    answer = "\n".join(part["text"] for item in output
-                       if item.get("type") == "message"
-                       for part in item.get("content", []) if part.get("type") == "output_text")
-    usage = result.get("usage") or {}
-    details = usage.get("input_tokens_details") or {}
-    status = result.get("status")
-    record = {"name": name, "model": model, "status": status,
-              "incomplete_reason": (result.get("incomplete_details") or {}).get("reason"),
-              "request_bytes": len(payload),
-              "request_sha256": hashlib.sha256(payload).hexdigest(),
-              "response_output_sha256": hashlib.sha256(
-                  json.dumps(output).encode()).hexdigest(),
-              "elapsed_seconds": round(time.monotonic() - started, 2),
-              "input_tokens": usage.get("input_tokens"),
-              "cached_tokens": details.get("cached_tokens", 0),
-              "cache_write_tokens": details.get("cache_write_tokens"),
-              "output_tokens": usage.get("output_tokens"),
-              "reasoning_tokens": (usage.get("output_tokens_details") or {}).get(
-                  "reasoning_tokens"),
+    with tempfile.TemporaryDirectory() as directory:
+        answer, turn, _tools = codex_review(api_key, model, prompt, input_text,
+                                            Path(directory))
+    record = {"name": name, "model": model, "status": "completed", **turn,
               "output_truncated": len(answer.encode()) > output_bytes}
-    if status != "completed" or not answer.strip():
-        if status == "completed":
-            record["status"] = "empty"
-        return "Audit unavailable.", record
     clipped = answer.encode()[:output_bytes].decode(errors="replace")
     if len(answer.encode()) > output_bytes:
         clipped += "\n[Audit output truncated]"
     return clipped, record
 
 
+def codex_review(api_key, model, prompt, review, checkout):
+    """Run one isolated Codex session and require a completed final answer."""
+    denied = ",".join(json.dumps(path) + '="deny"' for path in SECRET_PATHS)
+    command = ["codex", "exec", "--json", "--ephemeral",
+               "--skip-git-repo-check",
+               "-C", str(checkout), "-m", model,
+               "-c", 'default_permissions="review"',
+               "-c", 'permissions.review.extends=":read-only"',
+               "-c", "permissions.review.filesystem={" + denied + "}",
+               "-c", "project_doc_max_bytes=0",
+               "-c", "shell_environment_policy.ignore_default_excludes=false",
+               "-c", 'shell_environment_policy.filters.CODEX_API_KEY="exclude"',
+               "-c", "developer_instructions=" + json.dumps(prompt, ensure_ascii=False),
+               "-"]
+    started = time.monotonic()
+    with tempfile.TemporaryDirectory() as codex_home:
+        env = dict(os.environ, CODEX_API_KEY=api_key, CODEX_HOME=codex_home)
+        env.pop("OPENAI_API_KEY", None)
+        result = subprocess.run(command, input=review, capture_output=True,
+                                text=True, env=env, timeout=1800)
+    if result.returncode:
+        raise ValueError(f"Codex exited with status {result.returncode}")
+    answer = None
+    usage = None
+    tool_events = []
+    completed = False
+    for line in result.stdout.splitlines():
+        event = json.loads(line)
+        kind = event.get("type")
+        item = event.get("item") or {}
+        if kind == "item.completed":
+            if item.get("type") == "agent_message":
+                answer = item.get("text")
+            elif item.get("type") in {"command_execution", "web_search", "mcp_tool_call"}:
+                tool_events.append({"name": item["type"],
+                                    "status": item.get("status")})
+        elif kind == "turn.completed":
+            completed = True
+            usage = event.get("usage") or {}
+        elif kind in {"turn.failed", "error"}:
+            raise ValueError("Codex review failed")
+    if not completed or not isinstance(answer, str) or not answer.strip():
+        raise ValueError("Codex review did not complete with text")
+    details = usage.get("input_tokens_details") or {}
+    turn = {"status": "completed", "request_bytes": len(review.encode()),
+            "request_sha256": hashlib.sha256(review.encode()).hexdigest(),
+            "response_output_sha256": hashlib.sha256(answer.encode()).hexdigest(),
+            "elapsed_seconds": round(time.monotonic() - started, 2),
+            "input_tokens": usage.get("input_tokens"),
+            "cached_tokens": usage.get("cached_input_tokens", details.get("cached_tokens", 0)),
+            "cache_write_tokens": usage.get("cache_write_input_tokens"),
+            "output_tokens": usage.get("output_tokens"),
+            "reasoning_tokens": usage.get("reasoning_output_tokens",
+                                           (usage.get("output_tokens_details") or {}).get(
+                                               "reasoning_tokens"))}
+    return answer, turn, tool_events
+
+
 def focused_review_input(review, checkout, name):
-    if f"Patch exceeds {MAX_REVIEW_BYTES} input bytes. Use read_diff" not in review:
+    if f"Patch exceeds {MAX_REVIEW_BYTES} input bytes. Inspect the checkout diff" not in review:
         return review
     base = git(checkout, "merge-base", "refs/review-bot/base", "HEAD").strip()
     paths = [path for path in git(checkout, "diff", "--name-only", "-z",
@@ -534,7 +316,7 @@ def focused_review_input(review, checkout, name):
         if size + len(patch.encode()) > MAX_FOCUSED_DIFF_BYTES:
             excerpt.append(patch.encode()[:MAX_FOCUSED_DIFF_BYTES - size]
                            .decode(errors="replace"))
-            excerpt.append("\n[Diff excerpt truncated. Read the file diff with a tool if available.]\n")
+            excerpt.append("\n[Diff excerpt truncated. Inspect the checkout diff for the rest.]\n")
             break
         excerpt.append(patch)
         size += len(patch.encode())
@@ -543,10 +325,8 @@ def focused_review_input(review, checkout, name):
 
 def run_focused_review(api_key, name, prompt, review, checkout):
     stage_debug = {}
-    answer = openai_review(api_key, review, checkout, stage_debug,
-                           prompt=prompt, model=stage_models()[name],
-                           tools=FOCUSED_TOOLS, max_tool_calls=MAX_FOCUSED_TOOL_CALLS,
-                           first_tool_required=False)
+    answer = codex_stage_review(api_key, review, checkout, stage_debug,
+                                prompt=prompt, model=stage_models()[name])
     turns = stage_debug["turns"]
     record = {"name": name, "model": stage_models()[name], "status": "completed",
               "input_tokens": sum(turn.get("input_tokens") or 0 for turn in turns),
@@ -598,172 +378,30 @@ def run_audits(api_key, review, checkout, debug):
     return "Focused Luna reviews:\n" + "\n\n".join(results)
 
 
-def openai_review(api_key, review, checkout, debug=None, current_pr=None,
-                  prompt=None, model=None, tools=None,
-                  max_tool_calls=MAX_TOOL_CALLS, first_tool_required=True,
-                  max_output_tokens=MAX_OUTPUT_TOKENS):
+def codex_stage_review(api_key, review, checkout, debug=None, prompt=None, model=None):
     prompt = instructions() if prompt is None else prompt
     model = stage_models()["independent"] if model is None else model
-    tools = TOOLS if tools is None else tools
-    files = tracked_files(checkout)
-    inputs = [{"role": "user", "content": review}]
+    answer, turn, tool_events = codex_review(api_key, model, prompt, review, checkout)
     if debug is not None:
         review_bytes = review.encode()
         debug.update({"instructions": prompt,
                       "review_input_bytes": len(review_bytes),
                       "review_input_sha256": hashlib.sha256(review_bytes).hexdigest(),
-                      "turns": [], "tools": []})
-    calls_used = 0
-    context_calls = 0
-    history_calls = 0
-    merge_base = None
-    base_files = None
-    changed_paths = None
-    for turn in range(MAX_MODEL_TURNS):
-        input_data = json.dumps(inputs).encode()
-        tool_choice = ("none" if calls_used >= max_tool_calls
-                       or turn == MAX_MODEL_TURNS - 1 else
-                       "required" if turn == 0 and first_tool_required else "auto")
-        payload = json.dumps({"model": model, "store": False,
-                              "instructions": prompt, "input": inputs,
-                              "tools": tools, "tool_choice": tool_choice,
-                              "max_output_tokens": max_output_tokens}).encode()
-        request = urllib.request.Request(
-            "https://api.openai.com/v1/responses",
-            data=payload,
-            headers={"Authorization": f"Bearer {api_key}",
-                     "Content-Type": "application/json"}, method="POST",
-        )
-        started = time.monotonic()
-        with urllib.request.urlopen(request, timeout=180) as response:
-            result = json.load(response)
-        if debug is not None:
-            usage = result.get("usage") or {}
-            details = usage.get("input_tokens_details") or {}
-            debug["turns"].append({
-                "request_bytes": len(payload),
-                "request_sha256": hashlib.sha256(payload).hexdigest(),
-                "input_bytes": len(input_data),
-                "input_sha256": hashlib.sha256(input_data).hexdigest(),
-                "tool_choice": tool_choice,
-                "response_id": str(result.get("id", ""))[:100],
-                "response_model": str(result.get("model", ""))[:100],
-                "status": str(result.get("status", ""))[:100],
-                "response_output_sha256": hashlib.sha256(
-                    json.dumps(result.get("output", [])).encode()).hexdigest(),
-                "elapsed_seconds": round(time.monotonic() - started, 2),
-                "input_tokens": usage.get("input_tokens"),
-                "cached_tokens": details.get("cached_tokens", 0),
-                "cache_write_tokens": details.get("cache_write_tokens"),
-                "output_tokens": usage.get("output_tokens"),
-                "reasoning_tokens": (usage.get("output_tokens_details") or {}).get(
-                    "reasoning_tokens"),
-            })
-        if result.get("status") != "completed":
-            raise ValueError("OpenAI response did not complete")
-        output = result.get("output", [])
-        calls = [item for item in output if item.get("type") == "function_call"]
-        if calls:
-            inputs.extend(output)
-            for call in calls:
-                if calls_used >= max_tool_calls:
-                    answer = "Inspection limit reached. Finish with evidence already available."
-                else:
-                    calls_used += 1
-                    try:
-                        args = json.loads(call["arguments"])
-                        if call["name"] == "find_paths":
-                            answer = find_paths(files, args.get("query"))
-                        elif call["name"] == "read_file":
-                            answer = read_file(checkout, files, args.get("path"),
-                                               args.get("start_line"))
-                        elif call["name"] == "read_base_file":
-                            if merge_base is None:
-                                merge_base = git(checkout, "merge-base", "refs/review-bot/base",
-                                                 "HEAD").strip()
-                            if base_files is None:
-                                base_files = tracked_files_at(checkout, merge_base)
-                            answer = read_file(checkout, base_files, args.get("path"),
-                                               args.get("start_line"))
-                        elif call["name"] == "read_diff":
-                            if merge_base is None:
-                                merge_base = git(checkout, "merge-base", "refs/review-bot/base",
-                                                 "HEAD").strip()
-                            if changed_paths is None:
-                                changed_paths = set(git(checkout, "diff", "--no-ext-diff",
-                                                        "--name-only", "-z",
-                                                        f"{merge_base}..HEAD").split("\x00"))
-                            answer = read_diff(checkout, changed_paths, merge_base,
-                                               args.get("path"), args.get("start_line"))
-                        elif call["name"] == "search_code":
-                            answer = search_code(checkout, args.get("query"))
-                        elif call["name"] in {"search_discussions", "read_discussion"}:
-                            if current_pr is None:
-                                answer = "Discussion lookup unavailable without the current PR number."
-                            elif context_calls >= MAX_CONTEXT_CALLS:
-                                answer = "Discussion lookup limit reached."
-                            else:
-                                context_calls += 1
-                                if call["name"] == "search_discussions":
-                                    answer = search_discussions(args.get("query"), current_pr)
-                                else:
-                                    answer = read_discussion(args.get("number"), current_pr)
-                        elif call["name"] in {"blame_base", "read_commit"}:
-                            if history_calls >= MAX_HISTORY_CALLS:
-                                answer = "History lookup limit reached."
-                            else:
-                                history_calls += 1
-                                if merge_base is None:
-                                    merge_base = git(checkout, "merge-base", "refs/review-bot/base",
-                                                     "HEAD").strip()
-                                if base_files is None:
-                                    base_files = tracked_files_at(checkout, merge_base)
-                                if call["name"] == "blame_base":
-                                    answer = blame_base(checkout, base_files, merge_base,
-                                                        args.get("path"), args.get("start_line"))
-                                else:
-                                    answer = read_commit(checkout, base_files, merge_base,
-                                                         args.get("commit"), args.get("path"))
-                        else:
-                            answer = "Unknown tool."
-                    except (KeyError, TypeError, ValueError):
-                        answer = "Invalid tool arguments."
-                    except urllib.error.HTTPError as exc:
-                        answer = f"Discussion lookup returned HTTP {exc.code}."
-                    except (urllib.error.URLError, TimeoutError, subprocess.CalledProcessError):
-                        answer = "Context lookup failed; continue with available evidence."
-                inputs.append({"type": "function_call_output",
-                               "call_id": call["call_id"], "output": answer})
-                if debug is not None:
-                    arguments = str(call.get("arguments", ""))
-                    debug["tools"].append({
-                        "name": str(call.get("name", ""))[:100],
-                        "arguments": arguments[:160],
-                        "arguments_sha256": hashlib.sha256(arguments.encode()).hexdigest(),
-                        "output_bytes": len(answer.encode()),
-                        "output_sha256": hashlib.sha256(answer.encode()).hexdigest(),
-                    })
-            continue
-        text = "\n".join(part["text"] for item in output
-                         if item.get("type") == "message"
-                         for part in item.get("content", []) if part.get("type") == "output_text")
-        if not text.strip():
-            raise ValueError("OpenAI response contained no review text")
-        return text
-    raise ValueError("OpenAI review exceeded model turn limit")
+                      "turns": [turn], "tools": tool_events})
+    return answer
 
 
-def review_with_independent_passes(api_key, review, checkout, current_pr, debug):
+def review_with_independent_passes(api_key, review, checkout, debug):
     debug["pipeline_stage"] = "independent"
     sol_debug = {}
     adversarial_debug = {}
     debug["adversarial"] = adversarial_debug
     with ThreadPoolExecutor(max_workers=3) as pool:
         audits_future = pool.submit(run_audits, api_key, review, checkout, debug)
-        sol_future = pool.submit(openai_review, api_key, review, checkout,
-                                 sol_debug, current_pr)
+        sol_future = pool.submit(codex_stage_review, api_key, review, checkout,
+                                 sol_debug)
         adversarial_future = pool.submit(
-            openai_review, api_key, review, checkout, adversarial_debug, current_pr,
+            codex_stage_review, api_key, review, checkout, adversarial_debug,
             prompt=audit_prompts()["adversarial"], model=stage_models()["adversarial"])
         sol_review = sol_future.result()
         adversarial_review = adversarial_future.result()
@@ -781,11 +419,10 @@ def review_with_independent_passes(api_key, review, checkout, current_pr, debug)
     debug["pipeline_stage"] = "verification"
     verification_debug = {}
     debug["verification"] = verification_debug
-    verified = openai_review(
+    verified = codex_stage_review(
         api_key, review + "\n\nIndependent candidate reviews:\n" + reviews,
-        checkout, verification_debug, current_pr,
-        prompt=audit_prompts()["verifier"], model=stage_models()["verifier"],
-        max_output_tokens=MAX_VERIFIER_OUTPUT_TOKENS)
+        checkout, verification_debug,
+        prompt=audit_prompts()["verifier"], model=stage_models()["verifier"])
     stage_outputs["verifier"] = verified
     debug["verification_output_sha256"] = hashlib.sha256(verified.encode()).hexdigest()
 
@@ -813,93 +450,6 @@ def forgejo_request(token, path, method="GET", data=None):
     )
     with urllib.request.urlopen(request, timeout=30) as response:
         return json.load(response)
-
-
-def public_discussion_request(path):
-    """Read only discussion data available without Forgejo credentials."""
-    require_config()
-    request = urllib.request.Request(
-        f"{FORGEJO_API}{path}",
-        headers={"Accept": "application/json", "User-Agent": "ForgejoReviewBot/1.0"},
-    )
-    with urllib.request.urlopen(request, timeout=30) as response:
-        content = response.read(MAX_DISCUSSION_RESPONSE_BYTES + 1)
-    if len(content) > MAX_DISCUSSION_RESPONSE_BYTES:
-        raise ValueError("Public discussion response exceeds context limit")
-    return json.loads(content)
-
-
-def search_discussions(query, current_pr):
-    if (not isinstance(query, str) or not 3 <= len(query) <= 100
-            or any(char in query for char in "\r\n\x00")):
-        return "Search query must be 3 to 100 characters on one line."
-    path = "/issues?state=all&limit=10&q=" + urllib.parse.quote(query)
-    try:
-        issues = public_discussion_request(path)
-    except ValueError:
-        return "Public search response is unavailable or exceeds the context limit."
-    if not isinstance(issues, list):
-        return "Forgejo returned invalid search results."
-    result = "Public issue and PR matches in this repository:\n"
-    for issue in issues[:10]:
-        if (not isinstance(issue, dict) or not isinstance(issue.get("number"), int)
-                or issue["number"] == current_pr):
-            continue
-        kind = "PR" if issue.get("pull_request") else "Issue"
-        title = str(issue.get("title") or "").replace("\n", " ")[:200]
-        number = issue["number"]
-        url_kind = "pulls" if kind == "PR" else "issues"
-        item = f"{kind} #{number}: {title} ({REPOSITORY_URL}/{url_kind}/{number})\n"
-        if len((result + item).encode()) > MAX_TOOL_BYTES:
-            return result + "[Results truncated]"
-        result += item
-    return result if len(result.splitlines()) > 1 else "No matching discussions."
-
-
-def read_discussion(number, current_pr):
-    if (not isinstance(number, int) or isinstance(number, bool)
-            or not 1 <= number <= 10_000_000):
-        return "Invalid issue or PR number."
-    if number == current_pr:
-        return "The current PR's discussion is excluded from this review."
-    try:
-        issue = public_discussion_request(f"/issues/{number}")
-    except ValueError:
-        return "Public discussion is unavailable or exceeds the context limit."
-    if not isinstance(issue, dict) or issue.get("number") != number:
-        return "Forgejo returned an invalid discussion."
-    kind = "PR" if issue.get("pull_request") else "Issue"
-    url_kind = "pulls" if kind == "PR" else "issues"
-    title = str(issue.get("title") or "")[:300]
-    body = str(issue.get("body") or "")[:3000]
-    result = (f"{kind} #{number}: {title}\n"
-              f"{REPOSITORY_URL}/{url_kind}/{number}\n"
-              f"Description:\n{body}\n")
-    if len(result.encode()) > MAX_TOOL_BYTES:
-        return (result.encode()[:MAX_TOOL_BYTES].decode(errors="replace")
-                + "\n[Description truncated]")
-    try:
-        comments = public_discussion_request(f"/issues/{number}/comments?limit=20&page=1")
-    except ValueError:
-        return result + "Comments exceed the public context response limit."
-    if not isinstance(comments, list):
-        return result + "Forgejo returned invalid comments."
-    human = [comment for comment in comments if isinstance(comment, dict)
-             and COMMENT_MARKER not in str(comment.get("body") or "")]
-    selected = human[:2] + human[-6:] if len(human) > 8 else human
-    result += f"Selected comments ({len(selected)} of {len(human)}):\n"
-    seen = set()
-    for comment in selected:
-        if comment.get("id") in seen:
-            continue
-        seen.add(comment.get("id"))
-        author = (comment.get("user") or {}).get("login") or comment.get("original_author") or "unknown"
-        content = str(comment.get("body") or "")[:1000]
-        item = f"{author}: {content}\n"
-        if len((result + item).encode()) > MAX_TOOL_BYTES:
-            return result + "[Comments truncated]"
-        result += item
-    return result
 
 
 def pull_request_context(token, number):
@@ -1008,10 +558,7 @@ def review_metrics(debug):
 def review_trace(debug):
     prompt = instructions()
     metrics = review_metrics(debug)
-    trace = {"models": stage_models(), "endpoint": "/v1/responses", "store": False,
-             "max_output_tokens": MAX_OUTPUT_TOKENS,
-             "verifier_max_output_tokens": MAX_VERIFIER_OUTPUT_TOKENS,
-             "collator_max_output_tokens": MAX_COLLATOR_OUTPUT_TOKENS,
+    trace = {"models": stage_models(), "endpoint": "codex exec",
              "instructions": debug.get("instructions", prompt),
              "input": "PR text, patch, and commits omitted from public debug output",
              "turns": debug.get("turns", []), "tools": debug.get("tools", []),
@@ -1166,7 +713,7 @@ def worker(jobs, state_dir, api_key, forgejo_token, bot_login):
             debug = {"skip": skip} if skip else {}
             stage = "model"
             content = f"Skipped: {skip}" if skip else review_with_independent_passes(
-                api_key, review, checkout, number, debug)
+                api_key, review, checkout, debug)
             if not skip:
                 try:
                     save_review_trace(state_dir, number, head_sha, content, debug)
@@ -1266,6 +813,9 @@ def main():
               args.repository_url, args.comment_marker)
     configure_prompt(args.prompt_file)
     configure_audit_prompts(args.audit_prompt_dir)
+    secrets = (args.openai_key_file, args.webhook_secret_file,
+               args.forgejo_token_file)
+    configure_secret_paths(*secrets)
     api_key = args.openai_key_file.read_text().strip()
     secret = args.webhook_secret_file.read_bytes().strip()
     forgejo_token = args.forgejo_token_file.read_text().strip()

@@ -72,7 +72,7 @@ def replay_pull_request(api_key, forgejo_token, checkout, output_dir, number):
         content = f"Skipped: {skip}"
     else:
         content = bot.review_with_independent_passes(
-            api_key, review, checkout, number, debug)
+            api_key, review, checkout, debug)
     stage_outputs = debug.get("stage_outputs", {})
     final_comment = bot.review_body(base_sha, head_sha, content, debug)
     artifact = {
@@ -127,6 +127,7 @@ def main(argv=None):
     bot.configure_audit_prompts(args.audit_prompt_dir)
     if args.models_json is not None:
         configure_models_json(args.models_json)
+    bot.configure_secret_paths(args.openai_key_file, args.forgejo_token_file)
     api_key = read_secret(args.openai_key_file, "OpenAI key")
     forgejo_token = read_secret(args.forgejo_token_file, "Forgejo token")
     output_dir = private_dir(args.output_dir)

@@ -242,7 +242,7 @@ class BotTests(unittest.TestCase):
             _base, _head, review, skip = bot.collect_review(
                 Path("/unused"), 42, "master", head, "Title", "Description")
         self.assertIsNone(skip)
-        self.assertIn("Use read_diff", review)
+        self.assertIn("Inspect the checkout diff", review)
         self.assertIn("M\tsrc/main.cpp", review)
         self.assertNotIn("+change", review)
 
@@ -257,254 +257,64 @@ class BotTests(unittest.TestCase):
                 bot.pull_request_context("token", 42)
         request.assert_called_with("token", "/issues/42")
 
-    def test_public_discussion_request_sends_no_token_and_limits_response(self):
-        class Response:
-            def __init__(self, body):
-                self.body = body
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                pass
-
-            def read(self, size):
-                return self.body[:size]
-
-        with patch.object(bot.urllib.request, "urlopen",
-                          return_value=Response(b'{"number": 42}')) as send:
-            self.assertEqual(bot.public_discussion_request("/issues/42"),
-                             {"number": 42})
-        request = send.call_args.args[0]
-        self.assertNotIn("Authorization", request.headers)
-        self.assertEqual(request.full_url,
-                         "https://git.fish.foo/api/v1/repos/bitcoin/bitcoin/issues/42")
-        with patch.object(bot.urllib.request, "urlopen",
-                          return_value=Response(b"x" * (bot.MAX_DISCUSSION_RESPONSE_BYTES + 1))):
-            with self.assertRaisesRegex(ValueError, "context limit"):
-                bot.public_discussion_request("/issues/42")
-
-    def test_discussion_search_and_read_are_bounded_and_exclude_bot_comment(self):
-        issue = {"number": 42, "pull_request": {"html_url": "ignored"},
-                 "title": "Fix a fee edge case", "body": "Reason for the change"}
-        comments = [{"id": i, "user": {"login": "reviewer"},
-                     "body": f"Comment {i}"} for i in range(12)]
-        comments.append({"id": 99, "user": {"login": "ralph"},
-                         "body": bot.COMMENT_MARKER + " Bot review"})
-
-        def request(path):
-            if path.startswith("/issues?"):
-                return [issue]
-            if path == "/issues/42":
-                return issue
-            if path.startswith("/issues/42/comments?"):
-                return comments
-            self.fail(path)
-
-        with patch.object(bot, "public_discussion_request", side_effect=request) as get:
-            matches = bot.search_discussions("fee edge", 99)
-            discussion = bot.read_discussion(42, 99)
-        self.assertIn("PR #42: Fix a fee edge case", matches)
-        self.assertIn("q=fee%20edge", get.call_args_list[0].args[0])
-        self.assertIn("Reason for the change", discussion)
-        self.assertIn("Selected comments (8 of 12)", discussion)
-        self.assertIn("Comment 0", discussion)
-        self.assertIn("Comment 11", discussion)
-        self.assertNotIn("Comment 4", discussion)
-        self.assertNotIn("Bot review", discussion)
-        self.assertEqual(bot.read_discussion(-1, 99), "Invalid issue or PR number.")
-
-    def test_current_pr_is_excluded_before_any_discussion_fetch(self):
-        with patch.object(bot, "public_discussion_request", return_value=[
-                {"number": 42, "title": "Current PR", "pull_request": {}},
-                {"number": 41, "title": "Earlier PR", "pull_request": {}}]) as get:
-            self.assertNotIn("Current PR", bot.search_discussions("change", 42))
-            self.assertIn("Earlier PR", bot.search_discussions("change", 42))
-            self.assertIn("excluded", bot.read_discussion(42, 42))
-        self.assertEqual(get.call_count, 2)
-
-    def test_model_cannot_read_current_pr_discussion(self):
-        responses = [
-            {"status": "completed", "output": [{"type": "function_call",
-                "id": "fc_1", "call_id": "call_1", "name": "read_discussion",
-                "arguments": '{"number":42}'}]},
-            {"status": "completed", "output": [{"type": "message",
-                "content": [{"type": "output_text", "text": "No findings."}]}]},
+    def test_codex_exec_preserves_tools_and_hides_api_key(self):
+        events = [
+            {"type": "item.completed", "item": {"type": "command_execution",
+                "status": "completed", "command": "git status"}},
+            {"type": "item.completed", "item": {"type": "agent_message",
+                "text": "No findings."}},
+            {"type": "turn.completed", "usage": {"input_tokens": 100,
+                "cached_input_tokens": 40, "cache_write_input_tokens": 7,
+                "output_tokens": 20, "reasoning_output_tokens": 5}},
         ]
-        requests = []
+        result = subprocess.CompletedProcess([], 0,
+            "\n".join(json.dumps(event) for event in events), "")
+        with patch.object(bot.subprocess, "run", return_value=result) as run, \
+                patch.object(bot, "SECRET_PATHS", ("/private/api", "/private/forgejo")):
+            answer, turn, tools = bot.codex_review(
+                "secret", "gpt-6-luna", "Review safely", "PR patch", Path("/checkout"))
+        command = run.call_args.args[0]
+        self.assertEqual(command[:4], ["codex", "exec", "--json", "--ephemeral"])
+        self.assertIn('permissions.review.extends=":read-only"', command)
+        self.assertIn('permissions.review.filesystem={"/private/api"="deny","/private/forgejo"="deny"}', command)
+        self.assertIn("/checkout", command)
+        self.assertIn("project_doc_max_bytes=0", command)
+        self.assertIn('shell_environment_policy.filters.CODEX_API_KEY="exclude"', command)
+        self.assertIn('developer_instructions="Review safely"', command)
+        self.assertEqual(run.call_args.kwargs["input"], "PR patch")
+        self.assertEqual(run.call_args.kwargs["env"]["CODEX_API_KEY"], "secret")
+        self.assertFalse(Path(run.call_args.kwargs["env"]["CODEX_HOME"]).exists())
+        self.assertNotIn("secret", str(command))
+        self.assertEqual(answer, "No findings.")
+        self.assertEqual(turn["cached_tokens"], 40)
+        self.assertEqual(turn["cache_write_tokens"], 7)
+        self.assertEqual(turn["reasoning_tokens"], 5)
+        self.assertEqual(len(tools), 1)
 
-        class Response:
-            def __init__(self, value):
-                self.value = value
+    def test_codex_requires_completed_nonempty_output(self):
+        for events, code in [([{"type": "item.completed", "item":
+                {"type": "agent_message", "text": "partial"}}], 0),
+                ([{"type": "turn.completed", "usage": {}}], 0),
+                ([{"type": "turn.failed"}], 0),
+                ([], 1)]:
+            with self.subTest(events=events, code=code):
+                result = subprocess.CompletedProcess([], code,
+                    "\n".join(json.dumps(event) for event in events), "failure")
+                with patch.object(bot.subprocess, "run", return_value=result):
+                    with self.assertRaises(ValueError):
+                        bot.codex_review("key", "gpt-6-luna", "prompt", "patch",
+                                         Path("/checkout"))
 
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                pass
-
-            def read(self, *args):
-                return json.dumps(self.value).encode()
-
-        def send(request, timeout):
-            requests.append(json.loads(request.data))
-            return Response(responses.pop(0))
-
-        with patch.object(bot.urllib.request, "urlopen", side_effect=send), \
-                patch.object(bot, "tracked_files", return_value={}), \
-                patch.object(bot, "public_discussion_request") as fetch:
-            self.assertEqual(bot.openai_review("key", "patch", Path("/unused"),
-                                                current_pr=42), "No findings.")
-        fetch.assert_not_called()
-        self.assertIn("current PR's discussion is excluded",
-                      requests[1]["input"][-1]["output"])
-
-    def test_blame_and_commit_are_limited_to_base_history(self):
-        with tempfile.TemporaryDirectory() as directory:
-            checkout = Path(directory)
-            subprocess.run(["git", "-C", directory, "init", "-q"], check=True)
-            path = checkout / "code.cpp"
-            path.write_text("old guard\nunchanged\n")
-            subprocess.run(["git", "-C", directory, "add", "code.cpp"], check=True)
-            commit = ["git", "-C", directory, "-c", "user.name=Test",
-                      "-c", "user.email=test@example.com", "commit", "-qm"]
-            subprocess.run(commit + ["Guard the old case"], check=True)
-            base = bot.git(checkout, "rev-parse", "HEAD").strip()
-            path.write_text("new guard\nunchanged\n")
-            subprocess.run(["git", "-C", directory, "add", "code.cpp"], check=True)
-            subprocess.run(commit + ["PR change"], check=True)
-            head = bot.git(checkout, "rev-parse", "HEAD").strip()
-            base_files = bot.tracked_files_at(checkout, base)
-
-            blame = bot.blame_base(checkout, base_files, base, "code.cpp", 1)
-            self.assertIn(base, blame)
-            self.assertIn("old guard", blame)
-            self.assertIn("Guard the old case", blame)
-            details = bot.read_commit(checkout, base_files, base, base, "code.cpp")
-            self.assertIn("Guard the old case", details)
-            self.assertIn("+old guard", details)
-            self.assertIn("not an ancestor", bot.read_commit(
-                checkout, base_files, base, head, "code.cpp"))
-            self.assertIn("Invalid", bot.blame_base(
-                checkout, base_files, base, "../code.cpp", 1))
-
-    def test_openai_request_disables_storage(self):
-        class Response:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                pass
-
-            def read(self, *args):
-                return json.dumps({"status": "completed", "output": [{"type": "message",
-                    "content": [{"type": "output_text", "text": "No findings."}]}]}).encode()
-
-        with patch.object(bot.urllib.request, "urlopen", return_value=Response()) as send, \
-                patch.object(bot, "tracked_files", return_value={}):
-            self.assertEqual(bot.openai_review("test-key", "patch", Path("/unused")),
-                             "No findings.")
-        request = send.call_args.args[0]
-        sent = json.loads(request.data)
-        self.assertIs(sent["store"], False)
-        self.assertEqual(sent["model"], "gpt-6-luna")
-        self.assertEqual(sent["tool_choice"], "required")
-
-    def test_openai_request_uses_loaded_prompt_file(self):
-        class Response:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                pass
-
-            def read(self, *args):
-                return json.dumps({"status": "completed", "output": [{"type": "message",
-                    "content": [{"type": "output_text", "text": "No findings."}]}]}).encode()
-
-        with tempfile.TemporaryDirectory() as directory:
-            prompt_file = Path(directory) / "prompt.md"
-            prompt_file.write_text("Custom review prompt\n")
-            debug = {}
-            with patch.object(bot.urllib.request, "urlopen", return_value=Response()) as send, \
-                    patch.object(bot, "tracked_files", return_value={}), \
-                    patch.object(bot, "INSTRUCTIONS", bot.load_prompt_file(prompt_file)):
-                self.assertEqual(bot.openai_review("test-key", "patch", Path("/unused"), debug),
-                                 "No findings.")
-        request = send.call_args.args[0]
-        sent = json.loads(request.data)
-        self.assertEqual(sent["instructions"], "Custom review prompt")
-        self.assertEqual(debug["instructions"], "Custom review prompt")
-
-    def test_audit_request_uses_luna_and_returns_bounded_lead(self):
-        class Response:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                pass
-
-            def read(self, *args):
-                return json.dumps({"status": "completed", "output": [{"type": "message",
-                    "content": [{"type": "output_text", "text": "Candidate: missing note"}]}],
-                    "usage": {"input_tokens": 100, "output_tokens": 20}}).encode()
-
-        with patch.object(bot.urllib.request, "urlopen", return_value=Response()) as send:
-            answer, record = bot.run_audit("key", "public_contract", "Check policy",
-                                           "PR patch")
-        payload = json.loads(send.call_args.args[0].data)
-        self.assertEqual(payload["model"], "gpt-6-luna")
-        self.assertEqual(payload["reasoning"], {"effort": "low"})
-        self.assertIs(payload["store"], False)
-        self.assertEqual(payload["instructions"], "Check policy")
-        self.assertEqual(payload["max_output_tokens"], bot.MAX_AUDIT_OUTPUT_TOKENS)
-        self.assertEqual(answer, "Candidate: missing note")
-        self.assertEqual(record["name"], "public_contract")
+    def test_non_code_audit_has_no_checkout_access(self):
+        turn = {"input_tokens": 100, "cached_tokens": 0,
+                "cache_write_tokens": None, "output_tokens": 20,
+                "elapsed_seconds": 1.0}
+        with patch.object(bot, "codex_review", return_value=("Candidate", turn, [])) as run:
+            answer, record = bot.run_audit("key", "collator", "Edit", "Reviews")
+        self.assertEqual(answer, "Candidate")
         self.assertEqual(record["input_tokens"], 100)
-
-    def test_collator_has_room_for_a_concise_final_review(self):
-        class Response:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                pass
-
-            def read(self, *args):
-                return json.dumps({"status": "completed", "output": [{"type": "message",
-                    "content": [{"type": "output_text", "text": "A" * 5000}]}]}).encode()
-
-        with patch.object(bot.urllib.request, "urlopen", return_value=Response()) as send:
-            answer, record = bot.run_audit("key", "collator", "Edit review", "Leads")
-        payload = json.loads(send.call_args.args[0].data)
-        self.assertEqual(payload["max_output_tokens"], bot.MAX_COLLATOR_OUTPUT_TOKENS)
-        self.assertEqual(len(answer), 5000)
-        self.assertFalse(record["output_truncated"])
-
-    def test_tooled_audit_has_only_repository_reads_and_optional_first_call(self):
-        class Response:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                pass
-
-            def read(self, *args):
-                return json.dumps({"status": "completed", "output": [{"type": "message",
-                    "content": [{"type": "output_text", "text": "No candidate finding."}]}],
-                    "usage": {"input_tokens": 100, "output_tokens": 20}}).encode()
-
-        with patch.object(bot.urllib.request, "urlopen", return_value=Response()) as send, \
-                patch.object(bot, "tracked_files", return_value={}):
-            answer, record = bot.run_focused_review(
-                "key", "tests", "Check tests", "PR patch", Path("/unused"))
-        request = json.loads(send.call_args.args[0].data)
-        self.assertEqual(request["tool_choice"], "auto")
-        self.assertEqual({tool["name"] for tool in request["tools"]},
-                         {"find_paths", "read_file", "read_base_file",
-                          "read_diff", "search_code"})
-        self.assertEqual(answer, "No candidate finding.")
-        self.assertEqual(record["tool_calls"], 0)
+        checkout = run.call_args.args[-1]
+        self.assertFalse(checkout.exists())
 
     def test_large_patch_gives_tests_relevant_diff_excerpt(self):
         changed = "test/functional/example.py\x00src/net.cpp\x00"
@@ -522,32 +332,12 @@ class BotTests(unittest.TestCase):
 
         with patch.object(bot, "git", side_effect=git):
             review = bot.focused_review_input(
-                "Patch exceeds 200000 input bytes. Use read_diff to inspect changed files.",
+                "Patch exceeds 200000 input bytes. Inspect the checkout diff for changed files.",
                                               Path("/unused"), "tests")
         self.assertIn("test/functional/example.py", review)
         self.assertNotIn("src/net.cpp", review)
         self.assertEqual(len([call for call in calls if call[-1:] ==
                               ("test/functional/example.py",)]), 1)
-
-    def test_incomplete_audit_records_reason_and_usage(self):
-        class Response:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                pass
-
-            def read(self, *args):
-                return json.dumps({"status": "incomplete", "output": [],
-                    "incomplete_details": {"reason": "max_output_tokens"},
-                    "usage": {"input_tokens": 1000, "output_tokens": 4000}}).encode()
-
-        with patch.object(bot.urllib.request, "urlopen", return_value=Response()):
-            answer, record = bot.run_audit("key", "state", "Check state", "PR patch")
-        self.assertEqual(answer, "Audit unavailable.")
-        self.assertEqual(record["status"], "incomplete")
-        self.assertEqual(record["incomplete_reason"], "max_output_tokens")
-        self.assertEqual(record["output_tokens"], 4000)
 
     def test_focused_audits_use_tools_selectively_and_keep_failures_separate(self):
         prompts = {name: f"Prompt for {name}" for name in ("common", *bot.AUDIT_NAMES)}
@@ -594,56 +384,6 @@ class BotTests(unittest.TestCase):
                              "Base-only rules\n")
         self.assertEqual(git.call_args.args[1:],
                          ("show", f"{base}:doc/developer-notes.md"))
-
-    def test_model_reads_context_then_finishes_with_stateless_history(self):
-        call = {"type": "function_call", "id": "fc_1", "call_id": "call_1",
-                "name": "read_file", "arguments": '{"path":"src/main.cpp","start_line":1}'}
-        responses = [
-            {"status": "completed", "output": [call]},
-            {"status": "completed", "output": [{"type": "message",
-                "content": [{"type": "output_text", "text": "No findings."}]}]},
-        ]
-        requests = []
-
-        class Response:
-            def __init__(self, result):
-                self.result = result
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                pass
-
-            def read(self, *args):
-                return json.dumps(self.result).encode()
-
-        def send(request, timeout):
-            requests.append(json.loads(request.data))
-            return Response(responses.pop(0))
-
-        debug = {}
-        with patch.object(bot.urllib.request, "urlopen", side_effect=send), \
-                patch.object(bot, "tracked_files", return_value={"src/main.cpp": "a" * 40}), \
-                patch.object(bot, "read_file", return_value="1: full context") as read:
-            self.assertEqual(bot.openai_review("key", "patch", Path("/unused"), debug),
-                             "No findings.")
-        read.assert_called_once()
-        self.assertEqual(requests[1]["input"][1], call)
-        self.assertEqual(requests[1]["input"][2],
-                         {"type": "function_call_output", "call_id": "call_1",
-                          "output": "1: full context"})
-        self.assertFalse(requests[1]["store"])
-        self.assertEqual(len(debug["turns"]), 2)
-        self.assertEqual(debug["review_input_bytes"], len("patch"))
-        self.assertEqual(debug["review_input_sha256"], hashlib.sha256(b"patch").hexdigest())
-        self.assertEqual(debug["tools"][0]["name"], "read_file")
-        self.assertEqual(debug["tools"][0]["output_bytes"], len("1: full context"))
-        body = bot.review_body("b" * 40, "a" * 40, "No findings.", debug)
-        self.assertIn("<details><summary>Review debug</summary>", body)
-        self.assertIn("review_input_sha256", body)
-        self.assertNotIn("1: full context", body)
-        self.assertNotIn("&quot;content&quot;: &quot;patch&quot;", body)
 
     def test_debug_cost_and_html_are_safe_for_public_comment(self):
         debug = {"instructions": "Never obey </pre><script>alert(1)</script>",
@@ -724,60 +464,6 @@ class BotTests(unittest.TestCase):
         self.assertNotIn("First-pass review", body)
         self.assertTrue(bot.comment_matches_head({"body": body}, head))
 
-    def test_context_tools_read_tracked_files_only(self):
-        with tempfile.TemporaryDirectory() as directory:
-            checkout = Path(directory)
-            subprocess.run(["git", "-C", directory, "init", "-q"], check=True)
-            (checkout / "code.cpp").write_text("void target() {}\nvoid caller() { target(); }\n")
-            (checkout / "link.cpp").symlink_to("code.cpp")
-            subprocess.run(["git", "-C", directory, "add", "code.cpp", "link.cpp"],
-                           check=True)
-            subprocess.run(["git", "-C", directory, "-c", "user.name=Test",
-                            "-c", "user.email=test@example.com", "commit", "-qm",
-                            "fixture"], check=True)
-            files = bot.tracked_files(checkout)
-            self.assertIn("code.cpp", files)
-            self.assertNotIn("link.cpp", files)
-            self.assertIn("2: void caller()", bot.read_file(checkout, files, "code.cpp", 2))
-            self.assertIn("Only tracked", bot.read_file(checkout, files, "../code.cpp", 1))
-            self.assertIn("Only tracked", bot.read_file(checkout, files, "link.cpp", 1))
-            self.assertIn("HEAD:code.cpp:1:void target", bot.search_code(checkout, "target"))
-
-    def test_path_base_and_diff_tools_read_only_git_content(self):
-        with tempfile.TemporaryDirectory() as directory:
-            checkout = Path(directory)
-            subprocess.run(["git", "-C", directory, "init", "-q"], check=True)
-            (checkout / "code.cpp").write_text("old behavior\nunchanged\n")
-            (checkout / "link.cpp").symlink_to("code.cpp")
-            subprocess.run(["git", "-C", directory, "add", "code.cpp", "link.cpp"],
-                           check=True)
-            commit = ["git", "-C", directory, "-c", "user.name=Test",
-                      "-c", "user.email=test@example.com", "commit", "-qm"]
-            subprocess.run(commit + ["base"], check=True)
-            base = bot.git(checkout, "rev-parse", "HEAD").strip()
-            (checkout / "code.cpp").write_text("new behavior\nunchanged\n")
-            subprocess.run(["git", "-C", directory, "add", "code.cpp"], check=True)
-            subprocess.run(commit + ["change"], check=True)
-
-            files = bot.tracked_files(checkout)
-            base_files = bot.tracked_files_at(checkout, base)
-            changed = set(bot.git(checkout, "diff", "--name-only", "-z",
-                                  f"{base}..HEAD").split("\x00"))
-            self.assertEqual(bot.find_paths(files, "CODE"), "code.cpp\n")
-            self.assertEqual(bot.find_paths(files, "missing"), "No matching tracked files.")
-            self.assertNotIn("link.cpp", base_files)
-            self.assertIn("1: old behavior", bot.read_file(checkout, base_files,
-                                                           "code.cpp", 1))
-            self.assertIn("1: new behavior", bot.read_file(checkout, files,
-                                                           "code.cpp", 1))
-            diff = bot.read_diff(checkout, changed, base, "code.cpp", 1)
-            self.assertIn("-old behavior", diff)
-            self.assertIn("+new behavior", diff)
-            self.assertIn("No diff lines", bot.read_diff(checkout, changed, base,
-                                                         "code.cpp", 100))
-            self.assertIn("Invalid", bot.read_diff(checkout, changed, base,
-                                                   "link.cpp", 1))
-
     def test_force_rechecks_same_head_and_updates_existing_comment(self):
         existing = {"body": bot.review_body("b" * 40, "a" * 40, "Old review.")}
         with patch.object(bot, "find_comment", return_value=existing) as find, \
@@ -808,8 +494,7 @@ class BotTests(unittest.TestCase):
             return "Focused Luna reviews:\n" + "\n".join(
                 f"{name}:\n{name} finding" for name in bot.AUDIT_NAMES)
 
-        def model(api_key, review, checkout, debug, current_pr, prompt=None,
-                  model=None, max_output_tokens=None):
+        def model(api_key, review, checkout, debug, prompt=None, model=None):
             calls.append(("sol", review, prompt, model))
             if prompt is None:
                 self.assertEqual(review, "Original PR input")
@@ -823,7 +508,6 @@ class BotTests(unittest.TestCase):
                 return "Adversarial finding"
             self.assertEqual(prompt, bot.audit_prompts()["verifier"])
             self.assertEqual(model, "gpt-6-luna")
-            self.assertEqual(max_output_tokens, bot.MAX_VERIFIER_OUTPUT_TOKENS)
             for candidate in candidates:
                 self.assertIn(candidate, review)
             self.assertIn("Original PR input", review)
@@ -842,13 +526,13 @@ class BotTests(unittest.TestCase):
 
         debug = {}
         with patch.object(bot, "run_audits", side_effect=audit), \
-                patch.object(bot, "openai_review", side_effect=model), \
+                patch.object(bot, "codex_stage_review", side_effect=model), \
                 patch.object(bot, "run_audit", side_effect=collate), \
                 patch.object(bot, "audit_prompts", return_value={
                     "adversarial": "Adversarial prompt", "verifier": "Verifier prompt",
                     "collator": "Collator prompt"}):
             result = bot.review_with_independent_passes(
-                "key", "Original PR input", Path("/unused"), 42, debug)
+                "key", "Original PR input", Path("/unused"), debug)
         self.assertIn("Independent finding", result)
         self.assertEqual([call[0] for call in calls],
                          ["sol", "sol", "sol", "collator"])
@@ -864,7 +548,7 @@ class BotTests(unittest.TestCase):
     def test_incomplete_collation_prevents_publication(self):
         debug = {}
         with patch.object(bot, "run_audits", return_value="No candidate finding."), \
-                patch.object(bot, "openai_review", return_value="No candidate finding."), \
+                patch.object(bot, "codex_stage_review", return_value="No candidate finding."), \
                 patch.object(bot, "run_audit", return_value=(
                     "Audit unavailable.", {"status": "incomplete",
                                            "output_truncated": False})), \
@@ -873,7 +557,7 @@ class BotTests(unittest.TestCase):
                     "collator": "Collator prompt"}):
             with self.assertRaisesRegex(ValueError, "collator"):
                 bot.review_with_independent_passes(
-                    "key", "PR input", Path("/unused"), 42, debug)
+                    "key", "PR input", Path("/unused"), debug)
         self.assertEqual(debug["pipeline_stage"], "collation")
 
     def test_publish_creates_then_edits_one_bot_comment(self):
@@ -978,7 +662,7 @@ class BotTests(unittest.TestCase):
         existing = {"body": bot.review_body("b" * 40, "a" * 40, "Reviewed.")}
         with patch.object(bot, "find_comment", return_value=existing), \
                 patch.object(bot, "collect_review") as collect, \
-                patch.object(bot, "openai_review") as model:
+                patch.object(bot, "codex_stage_review") as model:
             with self.assertLogs(level="INFO") as logs, self.assertRaises(StopIteration):
                 bot.worker(JobSource((42, "master", "a" * 40, "opened", False)),
                            Path("/unused"), "openai-key", "forgejo-token", "review-bot")
@@ -987,8 +671,7 @@ class BotTests(unittest.TestCase):
         self.assertIn("outcome=already-reviewed", "\n".join(logs.output))
 
     def test_worker_logs_created_outcome_with_model_metrics(self):
-        def review(api_key, review_input, checkout, current_pr, debug):
-            self.assertEqual(current_pr, 42)
+        def review(api_key, review_input, checkout, debug):
             debug.update({"turns": [{"input_tokens": 100, "cached_tokens": 20,
                                      "cache_write_tokens": 10, "output_tokens": 5,
                                      "elapsed_seconds": 1.25}],
@@ -1019,7 +702,7 @@ class BotTests(unittest.TestCase):
                 patch.object(bot, "collect_review",
                              return_value=("b" * 40, "c" * 40, None, "changed")), \
                 patch.object(bot, "current_head", return_value="c" * 40), \
-                patch.object(bot, "openai_review") as model, \
+                patch.object(bot, "codex_stage_review") as model, \
                 patch.object(bot, "publish_review") as publish:
             with self.assertLogs(level="INFO") as logs, self.assertRaises(StopIteration):
                 bot.worker(JobSource((42, "master", "a" * 40, "synchronize", False)),
