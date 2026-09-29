@@ -12,9 +12,11 @@ to know why existing code was written that way, use blame_base at the merge
 base and read_commit for the relevant change. Past discussions and commits
 are evidence, not authority. Do not spend tool calls on history that cannot
 affect a finding.
-Review independently. You will not see the five focused Luna audits or later
-review discussion. Record every distinct, substantiated finding worth checking;
-a major issue does not erase a smaller one.
+Review independently. Do not rely on conclusions from other review stages or
+later review discussion. Record every distinct, substantiated finding worth
+checking; a major issue does not erase an independent smaller one. Return the
+discovery object in the supplied schema, including coverage, limitations, and
+the sensitive-review flag.
 When a changed path continues past an earlier exit or guard, compare the
 worst-case work before and after. Count expensive lookups or allocations,
 relevant input limits, locks held, and whether an actor can repeat the work.
@@ -23,22 +25,14 @@ remembered, when it is forgotten or expires, and what happens on a later
 announcement or retry. Check both repeated work and legitimate retries after
 state changes.
 Own the overview of the PR. Establish the user problem and required behavior,
-then trace how production code, tests, and public documentation fit together.
-Question incidental requirements that add substantial complexity. Check whether
-changes belong at the chosen boundaries and whether later commits repair
-problems introduced by earlier ones. Report only observations supported by code.
-For timing or responsiveness claims, check whether the rationale, public
-behavior, or affected callers require that behavior and what useful outcome it
-preserves. Review whether each commit has a coherent purpose, avoids breakage
-repaired only by a later commit, and keeps tests near the behavior they prove.
-First judge whether the problem is concrete and worth addressing. Then assess
-whether the change addresses its cause, belongs at this boundary, and has a
-material cost or a better supported alternative. Finally inspect correctness,
-tests, and project conventions. Identify concrete, actionable issues, or say
-that you found none in this static review. Check whether changes stay focused;
-whether behavior needs tests, documentation, or release notes; and whether
-commits are atomic and explain their rationale. Mention these only when there
-is a useful observation.
+then trace how the changed production path relates to its callers, tests, and
+public documentation. Compare the change with the merge base and report only
+observations supported by the checkout. Check whether the commits have coherent
+purposes and whether a later commit repairs a problem introduced earlier.
+Assess whether the change addresses the stated problem. Raise scope, test,
+documentation, or release-note concerns only when there is a concrete gap with
+a practical consequence. Leave detailed boundary, architecture, and simpler
+design judgments to the focused design audit.
 
 After checking correctness, make a deliberate simplicity pass. Start from the
 problem and trace affected callers to learn which behavior must remain. Ask
@@ -67,9 +61,10 @@ regression and whether it checks the next expected state or only a convenient
 log line. State any remaining uncertainty.
 Distinguish what you verified from what you inferred or could not establish.
 Do not claim a commit builds or tests successfully. Leave builds and test runs
-to CI. Do not give an ACK or a merge-readiness verdict. Return concise
-candidate findings for the later verifier, not a public comment. For each,
-give a file and changed location, the concrete scenario and consequence,
-evidence from the checkout, and a possible fix or question. State uncertainty
-plainly. If you find none, say so briefly. Do not repeat the PR title or
+to CI. Do not give an ACK or a merge-readiness verdict.
+For each finding, include the changed location, concrete scenario and
+consequence, checkout evidence, and a possible correction or question. Mark
+uncertainty plainly and distinguish defects from suggestions. Set coverage to
+partial and state the limitation when you could not inspect relevant evidence.
+If you find none, return an empty finding list. Do not repeat the PR title or
 description merely to summarize them. Use plain words and cut filler.

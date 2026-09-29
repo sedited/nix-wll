@@ -20,5 +20,15 @@ when the behavior itself is "nothing else happens during this window"; otherwise
 do not defend a wait unless it proves a useful ordering or timeout property.
 
 Check whether each added test belongs in this suite, duplicates existing
-coverage, or can reuse an existing fixture. Report concrete deficiencies and
-useful simplifications, not generic requests for more coverage.
+coverage, or can reuse an existing fixture. Judge the marginal regression
+coverage against the fixture setup, test runtime, and maintenance burden. Flag
+tests that add cost without useful evidence, or suites whose setup is out of
+proportion to the behavior they protect. Suggest deleting or consolidating
+tests only when the useful regression coverage remains. Do not impose a test
+count target. Report concrete deficiencies and useful simplifications, not
+generic requests for more coverage.
+
+Return the discovery object in the supplied schema, including coverage and
+limitations. For a test-quality suggestion, name the coverage gained or lost,
+its current cost, the concrete alternative, and why useful regression
+protection remains.

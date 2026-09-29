@@ -9,6 +9,7 @@ import urllib.request
 from . import forgejo
 from .repository import (find_paths, read_file, read_diff, search_code, blame_base,
                          read_commit)
+from .spend import BudgetExceeded
 
 MAX_TOOL_CALLS = 24
 MAX_FOCUSED_TOOL_CALLS = 6
@@ -21,6 +22,7 @@ MAX_COLLATOR_OUTPUT_TOKENS = 6_000
 MAX_COLLATOR_OUTPUT_BYTES = 10_000
 MAX_CONTEXT_CALLS = 4
 MAX_HISTORY_CALLS = 4
+SAFE_NO_CHARGE_HTTP_STATUSES = {400, 401, 403, 404, 429}
 TOOLS = [
     {"type": "function", "name": "find_paths", "strict": True,
      "description": "Find tracked file paths at the PR head containing a case-insensitive "
@@ -87,17 +89,38 @@ TOOLS = [
 ]
 FOCUSED_TOOLS = TOOLS[:5]
 
-def request_response(api_key, data, stage_name, on_response=None):
+class StaleReview(Exception):
+    """The review no longer targets the current pull request head."""
+
+
+def request_response(api_key, data, stage_name, on_response=None, budget=None,
+                     is_current=None):
+    if is_current is not None and not is_current():
+        raise StaleReview("review head changed before model request")
     payload = json.dumps(data).encode()
+    token = budget.reserve(stage_name, data) if budget is not None else None
     request = urllib.request.Request(
         "https://api.openai.com/v1/responses", data=payload,
         headers={"Authorization": f"Bearer {api_key}",
                  "Content-Type": "application/json"}, method="POST",
     )
     started = time.monotonic()
-    with urllib.request.urlopen(request, timeout=180) as response:
-        result = json.load(response)
+    try:
+        with urllib.request.urlopen(request, timeout=180) as response:
+            result = json.load(response)
+        if not isinstance(result, dict):
+            raise ValueError("OpenAI response was not a JSON object")
+    except urllib.error.HTTPError as exc:
+        if budget is not None:
+            budget.fail(token, charged_unknown=exc.code not in SAFE_NO_CHARGE_HTTP_STATUSES)
+        raise
+    except Exception:
+        if budget is not None:
+            budget.fail(token, charged_unknown=True)
+        raise
     elapsed = round(time.monotonic() - started, 2)
+    if budget is not None:
+        budget.settle(token, result)
     if on_response is not None:
         on_response(stage_name, payload, result)
     return result, payload, elapsed
@@ -106,17 +129,50 @@ def request_response(api_key, data, stage_name, on_response=None):
 def response_record(result, payload, elapsed):
     usage = result.get("usage") or {}
     details = usage.get("input_tokens_details") or {}
-    return {"request_bytes": len(payload),
+    cache_write_tokens = details.get("cache_write_tokens")
+    input_tokens = usage.get("input_tokens")
+    output_tokens = usage.get("output_tokens")
+    return {"model": result.get("model"), "response_id": result.get("id"),
+            "status": result.get("status"), "error": result.get("error"),
+            "request_bytes": len(payload),
             "request_sha256": hashlib.sha256(payload).hexdigest(),
             "response_output_sha256": hashlib.sha256(
                 json.dumps(result.get("output", [])).encode()).hexdigest(),
             "elapsed_seconds": elapsed,
-            "input_tokens": usage.get("input_tokens"),
+            "input_tokens": input_tokens,
             "cached_tokens": details.get("cached_tokens", 0),
-            "cache_write_tokens": details.get("cache_write_tokens"),
-            "output_tokens": usage.get("output_tokens"),
+            "cache_write_tokens": cache_write_tokens,
+            "output_tokens": output_tokens,
+            "usage_known": input_tokens is not None and output_tokens is not None,
+            "usage_complete": (input_tokens is not None and output_tokens is not None
+                               and cache_write_tokens is not None),
             "reasoning_tokens": (usage.get("output_tokens_details") or {}).get(
                 "reasoning_tokens")}
+
+
+def request_failure_record(data, error):
+    payload = json.dumps(data).encode()
+    record = {"model": data.get("model"), "response_id": None,
+              "status": "failed", "request_bytes": len(payload),
+              "request_sha256": hashlib.sha256(payload).hexdigest(),
+              "response_output_sha256": None, "elapsed_seconds": None,
+              "input_tokens": None, "cached_tokens": None,
+              "cache_write_tokens": None, "output_tokens": None,
+              "usage_known": False, "usage_complete": False,
+              "reasoning_tokens": None, "error": type(error).__name__}
+    if isinstance(error, urllib.error.HTTPError):
+        record["http_status"] = error.code
+    return record
+
+
+def _stage_record(debug, name, model):
+    debug.setdefault("name", name)
+    debug.setdefault("model", model)
+    debug.setdefault("status", "pending")
+    debug.setdefault("turns", [])
+    debug.setdefault("tools", [])
+    debug.setdefault("raw_output", "")
+    return debug
 
 
 def output_text(output):
@@ -126,41 +182,75 @@ def output_text(output):
                      if part.get("type") == "output_text")
 
 
-def run_audit(api_key, name, prompt, review, prompt_config, notes="", on_response=None):
+def run_audit(api_key, name, prompt, review, prompt_config, notes="", on_response=None,
+              budget=None, response_schema=None, reasoning_effort="low",
+              is_current=None, debug=None):
     model = prompt_config.models[name]
     output_tokens = (MAX_COLLATOR_OUTPUT_TOKENS if name == "collator"
                      else MAX_AUDIT_OUTPUT_TOKENS)
-    output_bytes = (MAX_COLLATOR_OUTPUT_BYTES if name == "collator"
-                    else MAX_AUDIT_OUTPUT_BYTES)
     input_text = review + ("\n\nMerge-base doc/developer-notes.md:\n" + notes
                            if name == "developer_notes" else "")
-    result, payload, elapsed = request_response(api_key, {
-        "model": model, "store": False, "reasoning": {"effort": "low"},
-        "instructions": prompt, "input": [{"role": "user", "content": input_text}],
-        "max_output_tokens": output_tokens}, name, on_response)
+    data = {"model": model, "store": False,
+            "reasoning": {"effort": reasoning_effort},
+            "instructions": prompt,
+            "input": [{"role": "user", "content": input_text}],
+            "max_output_tokens": output_tokens}
+    if response_schema is not None:
+        data["text"] = {"format": {"type": "json_schema", "name": name,
+                                    "strict": True, "schema": response_schema}}
+    try:
+        result, payload, elapsed = request_response(
+            api_key, data, name, on_response, budget, is_current)
+    except StaleReview:
+        if debug is not None:
+            debug.update(status="stale", error="StaleReview")
+        raise
+    except BudgetExceeded:
+        if debug is not None:
+            debug.update(status="budget_exhausted", error="BudgetExceeded")
+        raise
+    except Exception as exc:
+        failure = request_failure_record(data, exc)
+        if debug is not None:
+            stage = _stage_record(debug, name, model)
+            stage["status"] = "failed"
+            stage["error"] = failure["error"]
+            stage["turns"].append(failure)
+        raise
     answer = output_text(result.get("output", []))
     status = result.get("status")
     record = {"name": name, "model": model, "status": status,
               "incomplete_reason": (result.get("incomplete_details") or {}).get("reason"),
               **response_record(result, payload, elapsed),
-              "output_truncated": len(answer.encode()) > output_bytes}
+              "raw_output": answer, "output_truncated": False}
+    if debug is not None:
+        stage = _stage_record(debug, name, model)
+        stage.update({"status": status, "raw_output": answer,
+                      "incomplete_reason": record["incomplete_reason"]})
+        stage["turns"].append(record.copy())
     if status != "completed" or not answer.strip():
         if status == "completed":
             record["status"] = "empty"
-        return "Audit unavailable.", record
-    clipped = answer.encode()[:output_bytes].decode(errors="replace")
-    if len(answer.encode()) > output_bytes:
-        clipped += "\n[Audit output truncated]"
-    return clipped, record
+            record["error"] = "empty response"
+            if debug is not None:
+                stage["status"] = "empty"
+        return answer, record
+    return answer, record
 
 def openai_review(api_key, review, snapshot, bot_config, prompt_config, debug=None,
                   current_pr=None, prompt=None, model=None, tools=None,
                   max_tool_calls=MAX_TOOL_CALLS, first_tool_required=True,
                   max_output_tokens=MAX_OUTPUT_TOKENS, stage_name="independent",
-                  on_response=None):
+                  on_response=None, budget=None, response_schema=None,
+                  reasoning_effort="low", allow_discussions=True,
+                  is_current=None):
     prompt = prompt_config.instructions if prompt is None else prompt
     model = prompt_config.models["independent"] if model is None else model
     tools = TOOLS if tools is None else tools
+    if not allow_discussions:
+        tools = [tool for tool in tools if tool["name"] not in
+                 {"search_discussions", "read_discussion"}]
+    allowed_tools = {tool["name"] for tool in tools}
     checkout = snapshot.checkout
     files = snapshot.head_files
     inputs = [{"role": "user", "content": review}]
@@ -170,6 +260,9 @@ def openai_review(api_key, review, snapshot, bot_config, prompt_config, debug=No
                       "review_input_bytes": len(review_bytes),
                       "review_input_sha256": hashlib.sha256(review_bytes).hexdigest(),
                       "turns": [], "tools": []})
+        stage_debug = _stage_record(debug, stage_name, model)
+    else:
+        stage_debug = None
     calls_used = 0
     context_calls = 0
     history_calls = 0
@@ -178,21 +271,49 @@ def openai_review(api_key, review, snapshot, bot_config, prompt_config, debug=No
         tool_choice = ("none" if calls_used >= max_tool_calls
                        or turn == MAX_MODEL_TURNS - 1 else
                        "required" if turn == 0 and first_tool_required else "auto")
-        result, payload, elapsed = request_response(api_key, {
-            "model": model, "store": False, "instructions": prompt,
-            "input": inputs, "tools": tools, "tool_choice": tool_choice,
-            "max_output_tokens": max_output_tokens}, stage_name, on_response)
+        data = {"model": model, "store": False,
+                "reasoning": {"effort": reasoning_effort},
+                "instructions": prompt, "input": inputs, "tools": tools,
+                "tool_choice": tool_choice,
+                "max_output_tokens": max_output_tokens}
+        if response_schema is not None:
+            data["text"] = {"format": {"type": "json_schema",
+                                        "name": stage_name, "strict": True,
+                                        "schema": response_schema}}
+        try:
+            result, payload, elapsed = request_response(
+                api_key, data, stage_name, on_response, budget, is_current)
+        except StaleReview:
+            if stage_debug is not None:
+                stage_debug.update(status="stale", error="StaleReview")
+            raise
+        except BudgetExceeded:
+            if stage_debug is not None:
+                stage_debug.update(status="budget_exhausted", error="BudgetExceeded")
+            raise
+        except Exception as exc:
+            failure = request_failure_record(data, exc)
+            if debug is not None:
+                debug["turns"].append(failure)
+                stage_debug["status"] = "failed"
+                stage_debug["error"] = failure["error"]
+            raise
         if debug is not None:
-            debug["turns"].append({
+            turn_record = {
                 **response_record(result, payload, elapsed),
                 "input_bytes": len(input_data),
                 "input_sha256": hashlib.sha256(input_data).hexdigest(),
                 "tool_choice": tool_choice,
-                "response_id": str(result.get("id", ""))[:100],
-                "response_model": str(result.get("model", ""))[:100],
-                "status": str(result.get("status", ""))[:100],
-            })
+                "incomplete_reason": (result.get("incomplete_details") or {}).get("reason"),
+            }
+            debug["turns"].append(turn_record)
+            stage_debug["status"] = result.get("status")
         if result.get("status") != "completed":
+            raw = output_text(result.get("output", []))
+            if stage_debug is not None:
+                stage_debug["raw_output"] = raw
+                stage_debug["incomplete_reason"] = (result.get("incomplete_details") or {}).get(
+                    "reason")
             raise ValueError("OpenAI response did not complete")
         output = result.get("output", [])
         calls = [item for item in output if item.get("type") == "function_call"]
@@ -205,7 +326,9 @@ def openai_review(api_key, review, snapshot, bot_config, prompt_config, debug=No
                     calls_used += 1
                     try:
                         args = json.loads(call["arguments"])
-                        if call["name"] == "find_paths":
+                        if call.get("name") not in allowed_tools:
+                            answer = "Unknown or unavailable tool."
+                        elif call["name"] == "find_paths":
                             answer = find_paths(files, args.get("query"))
                         elif call["name"] == "read_file":
                             answer = read_file(checkout, files, args.get("path"),
@@ -262,7 +385,12 @@ def openai_review(api_key, review, snapshot, bot_config, prompt_config, debug=No
                     })
             continue
         text = output_text(output)
+        if stage_debug is not None:
+            stage_debug["raw_output"] = text
         if not text.strip():
+            if stage_debug is not None:
+                stage_debug["status"] = "empty"
+                stage_debug["error"] = "OpenAI response contained no review text"
             raise ValueError("OpenAI response contained no review text")
         return text
     raise ValueError("OpenAI review exceeded model turn limit")

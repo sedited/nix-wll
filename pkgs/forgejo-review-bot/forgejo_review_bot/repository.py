@@ -227,16 +227,20 @@ def audit_developer_notes(snapshot):
     return content + ("\n[Developer notes truncated]"
                       if len(notes.encode()) > MAX_AUDIT_DOC_BYTES else "")
 
+def is_test_path(path):
+    return (path.startswith(("test/", "tests/", "qa/", "src/test/", "src/wallet/test/"))
+            or "/test/" in path or "/tests/" in path)
+
+
 def focused_review_input(review, snapshot, name):
     if f"Patch exceeds {MAX_REVIEW_BYTES} input bytes. Use read_diff" not in review:
         return review
     checkout, base, head = snapshot.checkout, snapshot.merge_base, snapshot.head_sha
-    paths = [path for path in git(checkout, "diff", "--name-only", "-z",
-                                  f"{base}..{head}").split("\x00") if path]
+    paths = sorted(snapshot.changed_paths)
     if name == "tests":
-        paths = [path for path in paths if path.startswith(("test/", "tests/", "qa/"))]
+        paths.sort(key=lambda path: not is_test_path(path))
     elif name == "design":
-        paths = [path for path in paths if not path.startswith(("test/", "tests/", "qa/", "doc/"))]
+        paths.sort(key=lambda path: is_test_path(path) or path.startswith("doc/"))
     excerpt = []
     size = 0
     for path in paths:
@@ -245,7 +249,8 @@ def focused_review_input(review, snapshot, name):
         if size + len(patch.encode()) > MAX_FOCUSED_DIFF_BYTES:
             excerpt.append(patch.encode()[:MAX_FOCUSED_DIFF_BYTES - size]
                            .decode(errors="replace"))
-            excerpt.append("\n[Diff excerpt truncated. Read the file diff with a tool if available.]\n")
+            excerpt.append("\n[Diff excerpt incomplete. Use read_diff for the remaining "
+                           "content of this file and later paths.]\n")
             break
         excerpt.append(patch)
         size += len(patch.encode())

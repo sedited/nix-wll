@@ -6,3 +6,7 @@ introduced by this PR.
 For caches and request trackers, identify the key used to suppress repeat work
 and when it is cleared or expires. Check both repeated requests and valid
 retries after the underlying state changes.
+
+Return the discovery object in the supplied schema, including coverage and
+limitations. Distinguish defects from suggestions and tie every claim to
+checkout evidence.

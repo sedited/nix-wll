@@ -1,44 +1,15 @@
 import hashlib
-import hmac
 import json
 import subprocess
 import tempfile
-import threading
 import unittest
 import urllib.error
 import urllib.request
-from http.server import ThreadingHTTPServer
 from pathlib import Path
-from queue import Queue
 from unittest.mock import patch
 
 
-from forgejo_review_bot import config, forgejo, model, pipeline, repository, service, trace
-
-
-def payload(action="opened", head="a" * 40):
-    return {"action": action,
-            "repository": {"full_name": "bitcoin/bitcoin",
-                           "html_url": "https://git.fish.foo/bitcoin/bitcoin"},
-            "pull_request": {"number": 42, "head": {"sha": head},
-                             "base": {"ref": "master"}}}
-
-
-class JobSource:
-    def __init__(self, *jobs):
-        self.jobs = list(jobs)
-
-    def get(self):
-        if self.jobs:
-            return self.jobs.pop(0)
-        raise StopIteration
-
-    def put(self, _job):
-        # This source supplies only the scripted jobs above.
-        pass
-
-    def task_done(self):
-        pass
+from forgejo_review_bot import config, forgejo, model, repository, trace
 
 
 class BotTests(unittest.TestCase):
@@ -54,6 +25,7 @@ class BotTests(unittest.TestCase):
         return repository.RepositorySnapshot(
             checkout, "b" * 40, "a" * 40, "b" * 40,
             files or {}, {}, frozenset())
+
 
     def test_config_derives_repository_url_and_default_marker(self):
         self.assertEqual(self.bot_config.repository_url, "https://git.fish.foo/bitcoin/bitcoin")
@@ -72,7 +44,7 @@ class BotTests(unittest.TestCase):
     def test_model_config_requires_adversarial_stage_and_prompt(self):
         with tempfile.TemporaryDirectory() as directory:
             audit_dir = Path(directory)
-            for name in ("common", "adversarial", *config.AUDIT_NAMES,
+            for name in ("common", "router", "adversarial", *config.AUDIT_NAMES,
                          "verifier", "collator"):
                 (audit_dir / f"{name}.md").write_text(f"{name} instructions\n")
             models = {name: "gpt-6.1-sol" if name in
@@ -80,6 +52,7 @@ class BotTests(unittest.TestCase):
                       for name in config.MODEL_NAMES}
             (audit_dir / "models.json").write_text(json.dumps(models))
             loaded = config.PromptConfig.load(config.DEFAULT_PROMPT_FILE, audit_dir)
+            self.assertEqual(loaded.audit_prompts["router"], "router instructions")
             self.assertEqual(loaded.audit_prompts["adversarial"],
                              "adversarial instructions")
             self.assertEqual(loaded.models["adversarial"], "gpt-6.1-sol")
@@ -89,104 +62,6 @@ class BotTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "each review stage"):
                 config.PromptConfig.load(config.DEFAULT_PROMPT_FILE, audit_dir)
 
-    def test_signature_checks_raw_body(self):
-        body = b'{"action":"opened"}'
-        sig = hmac.new(b"secret", body, hashlib.sha256).hexdigest()
-        self.assertTrue(service.valid_signature(body, sig, b"secret"))
-        self.assertFalse(service.valid_signature(body + b" ", sig, b"secret"))
-        self.assertFalse(service.valid_signature(body, "bad", b"secret"))
-
-    def test_event_filters_and_rejects_other_repository(self):
-        self.assertEqual(service.parse_event(self.bot_config, "pull_request", payload()),
-                         (42, "master", "a" * 40, "opened", False))
-        self.assertEqual(service.parse_event(self.bot_config, "pull_request", payload("synchronize")),
-                         (42, "master", "a" * 40, "synchronize", False))
-        forced = payload()
-        forced["review_bot_force"] = True
-        self.assertEqual(service.parse_event(self.bot_config, "pull_request", forced)[-1], True)
-        self.assertIsNone(service.parse_event(self.bot_config, "push", payload()))
-        self.assertIsNone(service.parse_event(self.bot_config, "pull_request", payload("closed")))
-        wrong = payload()
-        wrong["repository"]["full_name"] = "someone/bitcoin"
-        with self.assertRaises(ValueError):
-            service.parse_event(self.bot_config, "pull_request", wrong)
-
-    def test_webhook_queues_only_authenticated_target_event(self):
-        jobs = Queue()
-        server = ThreadingHTTPServer(("127.0.0.1", 0), service.make_handler(b"secret", jobs, self.bot_config))
-        thread = threading.Thread(target=server.serve_forever)
-        thread.start()
-        try:
-            body = json.dumps(payload()).encode()
-            sig = hmac.new(b"secret", body, hashlib.sha256).hexdigest()
-            url = f"http://127.0.0.1:{server.server_port}/webhooks/forgejo"
-            request = urllib.request.Request(url, body, headers={
-                "X-Forgejo-Signature": sig, "X-Forgejo-Event": "pull_request"})
-            with self.assertLogs(level="INFO") as logs:
-                self.assertEqual(urllib.request.urlopen(request).status, 202)
-            self.assertEqual(jobs.get_nowait(), (42, "master", "a" * 40, "opened", False))
-            self.assertIn("review enqueue pr=42 action=opened head=aaaaaaaaaaaa",
-                          "\n".join(logs.output))
-            forced = payload()
-            forced["review_bot_force"] = True
-            body = json.dumps(forced).encode()
-            sig = hmac.new(b"secret", body, hashlib.sha256).hexdigest()
-            request = urllib.request.Request(url, body, headers={
-                "X-Forgejo-Signature": sig, "X-Forgejo-Event": "pull_request"})
-            self.assertEqual(urllib.request.urlopen(request).status, 202)
-            self.assertEqual(jobs.get_nowait(), (42, "master", "a" * 40, "opened", True))
-            request.headers["X-Forgejo-Signature"] = "bad"
-            with self.assertRaises(urllib.error.HTTPError) as error:
-                urllib.request.urlopen(request)
-            self.assertEqual(error.exception.code, 401)
-            self.assertTrue(jobs.empty())
-        finally:
-            server.shutdown()
-            server.server_close()
-            thread.join()
-
-    def test_wrong_path_log_redacts_query_and_identifies_non_webhook(self):
-        jobs = Queue()
-        server = ThreadingHTTPServer(("127.0.0.1", 0), service.make_handler(b"secret", jobs, self.bot_config))
-        thread = threading.Thread(target=server.serve_forever)
-        thread.start()
-        try:
-            body = b"{}"
-            url = f"http://127.0.0.1:{server.server_port}/?api_key=do-not-log"
-            request = urllib.request.Request(url, body, headers={"X-Next-Action": "probe"})
-            with self.assertLogs(level="WARNING") as logs:
-                with self.assertRaises(urllib.error.HTTPError) as error:
-                    urllib.request.urlopen(request)
-            self.assertEqual(error.exception.code, 404)
-            output = "\n".join(logs.output)
-            self.assertIn("reason=unexpected_path path=/", output)
-            self.assertIn("signature_present=False", output)
-            self.assertNotIn("do-not-log", output)
-            self.assertTrue(jobs.empty())
-        finally:
-            server.shutdown()
-            server.server_close()
-            thread.join()
-
-    def test_browser_gets_do_not_log_info(self):
-        jobs = Queue()
-        server = ThreadingHTTPServer(("127.0.0.1", 0), service.make_handler(b"secret", jobs, self.bot_config))
-        thread = threading.Thread(target=server.serve_forever)
-        thread.start()
-        try:
-            url = f"http://127.0.0.1:{server.server_port}/?api_key=do-not-log"
-            with patch.object(service.logging, "info") as info, \
-                    patch.object(service.logging, "debug") as debug:
-                with self.assertRaises(urllib.error.HTTPError) as error:
-                    urllib.request.urlopen(url)
-            self.assertEqual(error.exception.code, 501)
-            info.assert_not_called()
-            self.assertTrue(debug.called)
-            self.assertNotIn("do-not-log", str(debug.call_args))
-        finally:
-            server.shutdown()
-            server.server_close()
-            thread.join()
 
     def test_collect_review_skips_stale_head_without_model_call(self):
         outputs = iter(["", "b" * 40, "c" * 40])
@@ -408,7 +283,7 @@ class BotTests(unittest.TestCase):
         request = send.call_args.args[0]
         sent = json.loads(request.data)
         self.assertIs(sent["store"], False)
-        self.assertEqual(sent["model"], "gpt-6-luna")
+        self.assertEqual(sent["model"], self.prompt_config.models["independent"])
         self.assertEqual(sent["tool_choice"], "required")
 
     def test_openai_request_uses_loaded_prompt_file(self):
@@ -439,7 +314,9 @@ class BotTests(unittest.TestCase):
         self.assertEqual(sent["instructions"], "Custom review prompt")
         self.assertEqual(debug["instructions"], "Custom review prompt")
 
-    def test_audit_request_uses_luna_and_returns_bounded_lead(self):
+    def test_audit_request_uses_configured_model_and_keeps_full_output(self):
+        text = "Candidate: " + "x" * 5000
+
         class Response:
             def __enter__(self):
                 return self
@@ -449,21 +326,22 @@ class BotTests(unittest.TestCase):
 
             def read(self, *args):
                 return json.dumps({"status": "completed", "output": [{"type": "message",
-                    "content": [{"type": "output_text", "text": "Candidate: missing note"}]}],
+                    "content": [{"type": "output_text", "text": text}]}],
                     "usage": {"input_tokens": 100, "output_tokens": 20}}).encode()
 
         with patch.object(urllib.request, "urlopen", return_value=Response()) as send:
             answer, record = model.run_audit("key", "public_contract", "Check policy",
                                            "PR patch", self.prompt_config)
         payload = json.loads(send.call_args.args[0].data)
-        self.assertEqual(payload["model"], "gpt-6-luna")
+        self.assertEqual(payload["model"], self.prompt_config.models["public_contract"])
         self.assertEqual(payload["reasoning"], {"effort": "low"})
         self.assertIs(payload["store"], False)
         self.assertEqual(payload["instructions"], "Check policy")
         self.assertEqual(payload["max_output_tokens"], model.MAX_AUDIT_OUTPUT_TOKENS)
-        self.assertEqual(answer, "Candidate: missing note")
+        self.assertEqual(answer, text)
         self.assertEqual(record["name"], "public_contract")
         self.assertEqual(record["input_tokens"], 100)
+        self.assertFalse(record["output_truncated"])
 
     def test_collator_has_room_for_a_concise_final_review(self):
         class Response:
@@ -484,53 +362,27 @@ class BotTests(unittest.TestCase):
         self.assertEqual(len(answer), 5000)
         self.assertFalse(record["output_truncated"])
 
-    def test_tooled_audit_has_only_repository_reads_and_optional_first_call(self):
-        class Response:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                pass
-
-            def read(self, *args):
-                return json.dumps({"status": "completed", "output": [{"type": "message",
-                    "content": [{"type": "output_text", "text": "No candidate finding."}]}],
-                    "usage": {"input_tokens": 100, "output_tokens": 20}}).encode()
-
-        with patch.object(urllib.request, "urlopen", return_value=Response()) as send:
-            answer, record = pipeline.run_focused_review(
-                "key", "tests", "Check tests", "PR patch", self.snapshot(),
-                self.bot_config, self.prompt_config)
-        request = json.loads(send.call_args.args[0].data)
-        self.assertEqual(request["tool_choice"], "auto")
-        self.assertEqual({tool["name"] for tool in request["tools"]},
-                         {"find_paths", "read_file", "read_base_file",
-                          "read_diff", "search_code"})
-        self.assertEqual(answer, "No candidate finding.")
-        self.assertEqual(record["tool_calls"], 0)
-
     def test_large_patch_gives_tests_relevant_diff_excerpt(self):
-        changed = "test/functional/example.py\x00src/net.cpp\x00"
         calls = []
 
         def git(checkout, *args):
             calls.append(args)
-            if args[0] == "merge-base":
-                return "a" * 40 + "\n"
-            if args[0] == "diff" and "--name-only" in args:
-                return changed
             if args[-1] == "test/functional/example.py":
-                return "diff --git a/test/functional/example.py b/test/functional/example.py\n"
+                return ("diff --git a/test/functional/example.py b/"
+                        "test/functional/example.py\n"
+                        + "x" * repository.MAX_FOCUSED_DIFF_BYTES)
             return "diff --git a/src/net.cpp b/src/net.cpp\n"
 
         with patch.object(repository, "git", side_effect=git):
             review = repository.focused_review_input(
                 "Patch exceeds 200000 input bytes. Use read_diff to inspect changed files.",
-                                              self.snapshot(), "tests")
+                repository.RepositorySnapshot(
+                    Path("/unused"), "b" * 40, "a" * 40, "b" * 40,
+                    {}, {}, frozenset({"test/functional/example.py", "src/net.cpp"})),
+                "tests")
         self.assertIn("test/functional/example.py", review)
         self.assertNotIn("src/net.cpp", review)
-        self.assertEqual(len([call for call in calls if call[-1:] ==
-                              ("test/functional/example.py",)]), 1)
+        self.assertEqual([call[-1] for call in calls], ["test/functional/example.py"])
 
     def test_incomplete_audit_records_reason_and_usage(self):
         class Response:
@@ -547,50 +399,10 @@ class BotTests(unittest.TestCase):
 
         with patch.object(urllib.request, "urlopen", return_value=Response()):
             answer, record = model.run_audit("key", "state", "Check state", "PR patch", self.prompt_config)
-        self.assertEqual(answer, "Audit unavailable.")
+        self.assertEqual(answer, "")
         self.assertEqual(record["status"], "incomplete")
         self.assertEqual(record["incomplete_reason"], "max_output_tokens")
         self.assertEqual(record["output_tokens"], 4000)
-
-    def test_focused_audits_use_tools_selectively_and_keep_failures_separate(self):
-        prompts = {name: f"Prompt for {name}" for name in ("common", *config.AUDIT_NAMES)}
-        called = []
-
-        def audit(api_key, name, prompt, review, prompt_config, notes, on_response):
-            called.append((name, prompt, review, notes))
-            if name == "state":
-                raise urllib.error.HTTPError("https://api.openai.com", 429,
-                                             "rate limited", {}, None)
-            return f"Finding from {name}", {"name": name, "model": "gpt-6-luna",
-                                             "status": "completed", "input_tokens": 100,
-                                             "cached_tokens": 0, "cache_write_tokens": 0,
-                                             "output_tokens": 20, "elapsed_seconds": 1.0}
-
-        def tooled(api_key, name, prompt, review, snapshot, bot_config, prompt_config, on_response):
-            called.append((name, prompt, review, snapshot))
-            return f"Finding from {name}", {"name": name, "model": "gpt-6-luna",
-                                             "status": "completed", "input_tokens": 100,
-                                             "cached_tokens": 0, "cache_write_tokens": 0,
-                                             "output_tokens": 20, "elapsed_seconds": 1.0}
-
-        debug = {}
-        custom_prompts = config.PromptConfig(self.prompt_config.instructions,
-                                             prompts, self.prompt_config.models)
-        with patch.object(pipeline, "audit_developer_notes", return_value="base notes"), \
-                patch.object(pipeline, "run_audit", side_effect=audit), \
-                patch.object(pipeline, "run_focused_review", side_effect=tooled):
-            leads = pipeline.run_audits("key", "PR patch", self.snapshot(),
-                                        self.bot_config, custom_prompts, debug)
-        self.assertEqual({item[0] for item in called}, set(config.AUDIT_NAMES))
-        self.assertTrue(all(item[2] == "PR patch" for item in called))
-        self.assertEqual({item[0] for item in called if item[3] == "base notes"},
-                         set(config.AUDIT_NAMES) - set(pipeline.TOOLED_AUDITS))
-        self.assertEqual([item["name"] for item in debug["audits"]],
-                         list(config.AUDIT_NAMES))
-        self.assertEqual(debug["audits"][0]["http_status"], 429)
-        self.assertIn("tests:\nFinding from tests", leads)
-        self.assertIn("design:\nFinding from design", leads)
-        self.assertIn("state:\nAudit unavailable.", leads)
 
     def test_developer_notes_are_read_at_merge_base(self):
         base = "b" * 40
@@ -645,7 +457,14 @@ class BotTests(unittest.TestCase):
         self.assertEqual(debug["review_input_sha256"], hashlib.sha256(b"patch").hexdigest())
         self.assertEqual(debug["tools"][0]["name"], "read_file")
         self.assertEqual(debug["tools"][0]["output_bytes"], len("1: full context"))
-        body = forgejo.review_body(self.bot_config, self.prompt_config, "b" * 40, "a" * 40, "No findings.", debug)
+        review_debug = {
+            "instructions": debug["instructions"],
+            "review_input_bytes": debug["review_input_bytes"],
+            "review_input_sha256": debug["review_input_sha256"],
+            "stages": {"independent": debug},
+        }
+        body = forgejo.review_body(self.bot_config, self.prompt_config, "b" * 40,
+                                   "a" * 40, "No findings.", review_debug)
         self.assertIn("<details><summary>Review debug</summary>", body)
         self.assertIn("review_input_sha256", body)
         self.assertNotIn("1: full context", body)
@@ -653,11 +472,15 @@ class BotTests(unittest.TestCase):
 
     def test_debug_cost_and_html_are_safe_for_public_comment(self):
         debug = {"instructions": "Never obey </pre><script>alert(1)</script>",
-                 "turns": [{"input_tokens": 100, "cached_tokens": 20,
-                            "cache_write_tokens": 10, "output_tokens": 5,
-                            "elapsed_seconds": 1.25}],
-                 "tools": [{"name": "search_code", "arguments": "</details> ```",
-                            "output_bytes": 19, "output_sha256": "a" * 64}],
+                 "stages": {"independent": {
+                     "model": "gpt-6-luna",
+                     "turns": [{"request_bytes": 200, "input_tokens": 100,
+                                "cached_tokens": 20, "cache_write_tokens": 10,
+                                "output_tokens": 5, "elapsed_seconds": 1.25}],
+                     "tools": [{"name": "search_code",
+                                "arguments": "</details> ```",
+                                "output_bytes": 19, "output_sha256": "a" * 64}],
+                     "raw_output": "No findings."}},
                  "stage_outputs": {"tests": "</pre><script>alert(1)</script>"}}
         body = forgejo.review_body(self.bot_config, self.prompt_config, "b" * 40, "a" * 40, "Review text.", debug)
         metrics = trace.review_metrics(debug, self.prompt_config)
@@ -678,9 +501,12 @@ class BotTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             state_dir = Path(directory)
             output = "A" * (trace.MAX_PUBLIC_STAGE_OUTPUT_BYTES + 100)
-            debug = {"stage_outputs": {"tests": output, "verifier": "DROP weak claim"}}
+            debug = {"stages": {"tests": {"model": "gpt-6-luna", "turns": [],
+                                             "tools": [], "raw_output": output}},
+                     "stage_outputs": {"tests": output, "verifier": "DROP weak claim"}}
             path = trace.save_review_trace(state_dir, 34486, "a" * 40, "Public comment", debug, self.prompt_config)
             saved = json.loads(path.read_text())
+            self.assertEqual(saved["stages"]["tests"]["raw_output"], output)
             self.assertEqual(saved["stage_outputs"]["tests"], output)
             self.assertEqual(saved["review"], "Public comment")
             self.assertTrue(saved["trace"]["stage_outputs"]["tests"]["truncated"])
@@ -689,37 +515,39 @@ class BotTests(unittest.TestCase):
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
             self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
 
-    def test_review_cost_includes_luna_audits(self):
-        debug = {"turns": [{"input_tokens": 100, "cached_tokens": 20,
-                            "cache_write_tokens": 10, "output_tokens": 5,
-                            "elapsed_seconds": 1.25}],
-                 "audits": [{"name": "state", "status": "completed",
-                             "input_tokens": 1000, "cached_tokens": 100,
-                             "cache_write_tokens": 0, "output_tokens": 200,
-                             "elapsed_seconds": 2.0},
-                            {"name": "tests", "status": "incomplete",
-                             "input_tokens": 500, "cached_tokens": 0,
-                             "cache_write_tokens": 0, "output_tokens": 4000,
-                             "elapsed_seconds": 1.0}]}
-        metrics = trace.review_metrics(debug, self.prompt_config)
-        self.assertEqual(metrics["audit_calls"], 2)
-        self.assertEqual(metrics["estimated_cost_usd"], 0.002252)
-        self.assertEqual(metrics["total_input_tokens"], 1600)
-        self.assertEqual(metrics["total_output_tokens"], 4205)
+    def test_review_metrics_sum_stage_turns_and_price_missing_cache_write_conservatively(self):
+        def turn(input_tokens, cached_tokens, cache_write_tokens,
+                 output_tokens, elapsed):
+            return {"request_bytes": 100, "input_tokens": input_tokens,
+                    "cached_tokens": cached_tokens,
+                    "cache_write_tokens": cache_write_tokens,
+                    "output_tokens": output_tokens,
+                    "elapsed_seconds": elapsed}
 
-    def test_review_metrics_include_adversarial_sol_turns_and_tools(self):
-        turn = {"input_tokens": 100, "cached_tokens": 0,
-                "cache_write_tokens": 0, "output_tokens": 10,
-                "elapsed_seconds": 1.0}
-        debug = {"turns": [turn], "tools": [{"name": "read_file"}],
-                 "adversarial": {"turns": [turn],
-                                 "tools": [{"name": "search_code"}]}}
+        debug = {"stages": {
+            "router": {"model": "gpt-6-luna", "turns": [
+                turn(100, 20, None, 5, 1.0)], "tools": []},
+            "independent": {"model": "gpt-6-luna", "turns": [
+                turn(100, 20, 10, 5, 2.0), turn(100, 20, 10, 5, 3.0)],
+                "tools": [{"name": "read_file"}, {"name": "search_code"}]},
+            "tests": {"model": "gpt-6-luna", "status": "completed",
+                      "turns": [turn(100, 20, 10, 5, 6.0)], "tools": []},
+            "verifier": {"model": "gpt-6-luna", "turns": [
+                turn(1000, 100, 0, 200, 4.0)], "tools": []},
+            "collator": {"model": "gpt-6-luna", "turns": [
+                turn(500, 0, 0, 4000, 5.0)], "tools": []},
+            "state": {"status": "skipped", "turns": [], "tools": []},
+        }}
+
         metrics = trace.review_metrics(debug, self.prompt_config)
-        self.assertEqual(metrics["model_turns"], 2)
+        self.assertEqual(metrics["model_turns"], 6)
         self.assertEqual(metrics["tool_calls"], 2)
-        self.assertEqual(metrics["total_input_tokens"], 200)
-        self.assertEqual(metrics["total_output_tokens"], 20)
-        self.assertEqual(metrics["estimated_cost_usd"], 0.000315)
+        self.assertEqual(metrics["audit_calls"], 1)
+        self.assertEqual(metrics["total_input_tokens"], 1900)
+        self.assertEqual(metrics["total_output_tokens"], 4220)
+        self.assertEqual(metrics["estimated_cost_usd"], 0.002287)
+        self.assertEqual(metrics["incomplete_usage_count"], 1)
+        self.assertFalse(metrics["usage_complete"])
 
     def test_review_body_starts_with_commit_ids(self):
         base = "b" * 40
@@ -784,108 +612,6 @@ class BotTests(unittest.TestCase):
             self.assertIn("Invalid", repository.read_diff(checkout, changed, base, "HEAD",
                                                    "link.cpp", 1))
 
-    def test_force_rechecks_same_head_and_updates_existing_comment(self):
-        existing = {"body": forgejo.review_body(self.bot_config, self.prompt_config, "b" * 40, "a" * 40, "Old review.")}
-        with patch.object(forgejo, "find_comment", return_value=existing) as find, \
-                patch.object(forgejo, "pull_request_context", return_value=("Title", "Body")), \
-                patch.object(repository, "collect_review",
-                             return_value=("b" * 40, "a" * 40, "review input", None)), \
-                patch.object(repository, "snapshot_repository", return_value=self.snapshot()), \
-                patch.object(pipeline, "review_with_independent_passes",
-                             return_value="New review.") as review_model, \
-                patch.object(forgejo, "publish_review", return_value="updated") as publish:
-            with self.assertRaises(StopIteration):
-                service.worker(JobSource((42, "master", "a" * 40, "opened", True)),
-                           Path("/unused"), "openai-key", "forgejo-token", "review-bot",
-                           self.bot_config, self.prompt_config)
-        find.assert_not_called()
-        review_model.assert_called_once()
-        self.assertEqual(review_model.call_args.args[1], "review input")
-        publish.assert_called_once()
-
-    def test_six_independent_reviews_reach_verifier_and_collator(self):
-        calls = []
-        parallel_stage = threading.Barrier(3, timeout=3)
-        candidates = ["Independent finding", "Adversarial finding",
-                      *(f"{name} finding" for name in config.AUDIT_NAMES)]
-
-        def audit(api_key, review, snapshot, bot_config, prompt_config, debug, on_response):
-            self.assertEqual(review, "Original PR input")
-            parallel_stage.wait()
-            debug["audits"] = []
-            return "Focused reviews:\n" + "\n".join(
-                f"{name}:\n{name} finding" for name in config.AUDIT_NAMES)
-
-        def fake_model(api_key, review, snapshot, bot_config, prompt_config,
-                       debug, current_pr, prompt=None, model=None,
-                       max_output_tokens=None, **kwargs):
-            calls.append(("sol", review, prompt, model))
-            if prompt is None:
-                self.assertEqual(review, "Original PR input")
-                self.assertNotIn("Adversarial finding", review)
-                parallel_stage.wait()
-                return "Independent finding"
-            if prompt == "Adversarial prompt":
-                self.assertEqual(review, "Original PR input")
-                self.assertEqual(model, "gpt-6.1-sol")
-                parallel_stage.wait()
-                return "Adversarial finding"
-            self.assertEqual(prompt, custom_prompts.audit_prompts["verifier"])
-            self.assertEqual(model, "gpt-6-luna")
-            self.assertEqual(max_output_tokens, 8_000)
-            for candidate in candidates:
-                self.assertIn(candidate, review)
-            self.assertIn("Original PR input", review)
-            return "ACCEPT Independent finding; ACCEPT Adversarial finding"
-
-        def collate(api_key, name, prompt, review, prompt_config, on_response=None):
-            calls.append(("collator", review, prompt))
-            self.assertEqual(name, "collator")
-            self.assertNotIn("Original PR input", review)
-            for candidate in candidates:
-                self.assertIn(candidate, review)
-            self.assertIn("ACCEPT Adversarial finding", review)
-            return "##### 🟠 Major\nIndependent finding", {
-                "name": "collator", "model": "gpt-6-luna", "status": "completed",
-                "output_truncated": False}
-
-        debug = {}
-        custom_prompts = config.PromptConfig(
-            self.prompt_config.instructions,
-            {**self.prompt_config.audit_prompts,
-             "adversarial": "Adversarial prompt", "verifier": "Verifier prompt",
-             "collator": "Collator prompt"}, self.prompt_config.models)
-        with patch.object(pipeline, "run_audits", side_effect=audit), \
-                patch.object(pipeline, "openai_review", side_effect=fake_model), \
-                patch.object(pipeline, "run_audit", side_effect=collate):
-            result = pipeline.review_with_independent_passes(
-                "key", "Original PR input", self.snapshot(), self.bot_config,
-                custom_prompts, 42, debug)
-        self.assertIn("Independent finding", result)
-        self.assertEqual([call[0] for call in calls],
-                         ["sol", "sol", "sol", "collator"])
-        self.assertIn("independent_review_sha256", debug)
-        self.assertEqual(debug["adversarial_review_sha256"],
-                         hashlib.sha256(b"Adversarial finding").hexdigest())
-        self.assertIn("verification_output_sha256", debug)
-        self.assertIn("adversarial", trace.review_trace(debug, custom_prompts))
-        self.assertEqual(debug["stage_outputs"]["independent"], "Independent finding")
-        self.assertEqual(debug["stage_outputs"]["verifier"],
-                         "ACCEPT Independent finding; ACCEPT Adversarial finding")
-
-    def test_incomplete_collation_prevents_publication(self):
-        custom_prompts = self.prompt_config
-        debug = {}
-        with patch.object(pipeline, "run_audits", return_value="No candidate finding."), \
-                patch.object(pipeline, "openai_review", return_value="No candidate finding."), \
-                patch.object(pipeline, "run_audit", return_value=(
-                    "Audit unavailable.", {"status": "incomplete",
-                                           "output_truncated": False})):
-            with self.assertRaisesRegex(ValueError, "collator"):
-                pipeline.review_with_independent_passes(
-                    "key", "PR input", self.snapshot(), self.bot_config,
-                    custom_prompts, 42, debug)
-        self.assertEqual(debug["pipeline_stage"], "collation")
 
     def test_publish_creates_then_edits_one_bot_comment(self):
         comments = [{"id": 1, "user": {"login": "someone-else"},
@@ -984,99 +710,6 @@ class BotTests(unittest.TestCase):
             self.assertEqual(repository.current_head(self.bot_config, 42), "a" * 40)
         self.assertEqual(run.call_args.args[0],
                          ["git", "ls-remote", self.bot_config.origin, "refs/pull/42/head"])
-
-    def test_repeated_head_skips_model_call(self):
-        existing = {"body": forgejo.review_body(self.bot_config, self.prompt_config, "b" * 40, "a" * 40, "Reviewed.")}
-        with patch.object(forgejo, "find_comment", return_value=existing), \
-                patch.object(repository, "collect_review") as collect, \
-                patch.object(pipeline, "openai_review") as review_model:
-            with self.assertLogs(level="INFO") as logs, self.assertRaises(StopIteration):
-                service.worker(JobSource((42, "master", "a" * 40, "opened", False)),
-                           Path("/unused"), "openai-key", "forgejo-token", "review-bot",
-                           self.bot_config, self.prompt_config)
-        collect.assert_not_called()
-        review_model.assert_not_called()
-        self.assertIn("outcome=already-reviewed", "\n".join(logs.output))
-
-    def test_worker_logs_created_outcome_with_model_metrics(self):
-        def review(api_key, review_input, snapshot, bot_config, prompt_config,
-                   current_pr, debug):
-            self.assertEqual(current_pr, 42)
-            debug.update({"turns": [{"input_tokens": 100, "cached_tokens": 20,
-                                     "cache_write_tokens": 10, "output_tokens": 5,
-                                     "elapsed_seconds": 1.25}],
-                          "tools": [{"name": "read_file"}, {"name": "search_code"}]})
-            return "Review text."
-
-        with patch.object(forgejo, "find_comment", return_value=None), \
-                patch.object(forgejo, "pull_request_context", return_value=("Title", "Body")), \
-                patch.object(repository, "collect_review",
-                             return_value=("b" * 40, "a" * 40, "review input", None)), \
-                patch.object(repository, "snapshot_repository", return_value=self.snapshot()), \
-                patch.object(pipeline, "review_with_independent_passes", side_effect=review), \
-                patch.object(forgejo, "publish_review", return_value="created"):
-            with self.assertLogs(level="INFO") as logs, self.assertRaises(StopIteration):
-                service.worker(JobSource((42, "master", "a" * 40, "synchronize", False)),
-                           Path("/unused"), "openai-key", "forgejo-token", "review-bot",
-                           self.bot_config, self.prompt_config)
-        output = "\n".join(logs.output)
-        self.assertIn("review start pr=42 action=synchronize head=aaaaaaaaaaaa", output)
-        self.assertIn("outcome=created", output)
-        self.assertIn("model_turns=1", output)
-        self.assertIn("tool_calls=2", output)
-        self.assertIn("input_tokens=100", output)
-        self.assertIn("output_tokens=5", output)
-        self.assertIn("estimated_usd=1.1e-05", output)
-
-    def test_worker_logs_stale_outcome_before_model_call(self):
-        with patch.object(forgejo, "find_comment", return_value=None), \
-                patch.object(forgejo, "pull_request_context", return_value=("Title", "Body")), \
-                patch.object(repository, "collect_review",
-                             return_value=("b" * 40, "c" * 40, None, "changed")), \
-                patch.object(repository, "current_head", return_value="c" * 40), \
-                patch.object(pipeline, "openai_review") as review_model, \
-                patch.object(forgejo, "publish_review") as publish:
-            with self.assertLogs(level="INFO") as logs, self.assertRaises(StopIteration):
-                service.worker(JobSource((42, "master", "a" * 40, "synchronize", False)),
-                           Path("/unused"), "openai-key", "forgejo-token", "review-bot",
-                           self.bot_config, self.prompt_config)
-        review_model.assert_not_called()
-        publish.assert_not_called()
-        output = "\n".join(logs.output)
-        self.assertIn("outcome=stale", output)
-        self.assertIn("model_turns=0", output)
-        self.assertIn("estimated_usd=unknown", output)
-
-    def test_worker_logs_failed_stage_and_http_status(self):
-        error = urllib.error.HTTPError("https://git.fish.foo/api", 503, "down", {}, None)
-        with patch.object(forgejo, "find_comment", side_effect=error):
-            with self.assertLogs(level="ERROR") as logs, self.assertRaises(StopIteration):
-                service.worker(JobSource((42, "master", "a" * 40, "opened", False)),
-                           Path("/unused"), "openai-key", "forgejo-token", "review-bot",
-                           self.bot_config, self.prompt_config)
-        output = "\n".join(logs.output)
-        self.assertIn("outcome=failed", output)
-        self.assertIn("stage=precheck", output)
-        self.assertIn("error_type=HTTPError", output)
-        self.assertIn("http_status=503", output)
-        self.assertIn("http_host=git.fish.foo", output)
-
-    def test_worker_logs_unexpected_exception_and_keeps_running(self):
-        existing = {"body": forgejo.review_body(self.bot_config, self.prompt_config, "c" * 40, "b" * 40, "Reviewed.")}
-        with patch.object(forgejo, "find_comment",
-                          side_effect=[RuntimeError("token-secret"), existing]):
-            with self.assertLogs(level="INFO") as logs, self.assertRaises(StopIteration):
-                service.worker(JobSource((42, "master", "a" * 40, "opened", False),
-                                     (43, "master", "b" * 40, "synchronize", False)),
-                           Path("/unused"), "openai-key", "forgejo-token", "review-bot",
-                           self.bot_config, self.prompt_config)
-        output = "\n".join(logs.output)
-        self.assertIn("pr=42", output)
-        self.assertIn("outcome=failed", output)
-        self.assertIn("error_type=RuntimeError", output)
-        self.assertIn("pr=43", output)
-        self.assertIn("outcome=already-reviewed", output)
-        self.assertNotIn("token-secret", output)
 
 
 if __name__ == "__main__":

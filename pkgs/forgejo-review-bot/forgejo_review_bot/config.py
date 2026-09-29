@@ -8,7 +8,7 @@ from pathlib import Path
 DEFAULT_PROMPT_FILE = Path(__file__).resolve().parent.parent / "prompt.md"
 DEFAULT_AUDIT_DIR = Path(__file__).resolve().parent.parent / "audits"
 AUDIT_NAMES = ("state", "public_contract", "tests", "developer_notes", "design")
-MODEL_NAMES = ("independent", "adversarial", *AUDIT_NAMES, "verifier", "collator")
+MODEL_NAMES = ("router", "independent", "adversarial", *AUDIT_NAMES, "verifier", "collator")
 
 
 def load_prompt_file(path):
@@ -66,7 +66,7 @@ class PromptConfig:
     def load(cls, prompt_file=DEFAULT_PROMPT_FILE, audit_dir=DEFAULT_AUDIT_DIR,
              models_json=None):
         prompts = {name: load_prompt_file(audit_dir / f"{name}.md")
-                   for name in ("common", "adversarial", *AUDIT_NAMES,
+                   for name in ("common", "router", "adversarial", *AUDIT_NAMES,
                                 "verifier", "collator")}
         if any(not prompt.strip() for prompt in prompts.values()):
             raise ValueError("audit prompt files must not be empty")

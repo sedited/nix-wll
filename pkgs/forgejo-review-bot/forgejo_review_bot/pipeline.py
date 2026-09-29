@@ -1,124 +1,167 @@
-"""Focused audits and review stage orchestration."""
-import hashlib
-import urllib.error
-from concurrent.futures import ThreadPoolExecutor
+"""Run selected independent reviews, verify their evidence, then edit findings."""
 
-from .model import (FOCUSED_TOOLS, MAX_AUDIT_OUTPUT_BYTES, MAX_FOCUSED_TOOL_CALLS,
-                    MAX_VERIFIER_OUTPUT_TOKENS, openai_review, run_audit)
+import json
+
+from . import model, protocol, routing
+from .config import AUDIT_NAMES
 from .repository import audit_developer_notes, focused_review_input
+from .spend import BudgetExceeded
 
-AUDIT_NAMES = ("state", "public_contract", "tests", "developer_notes", "design")
-TOOLED_AUDITS = ("tests", "design")
+# A sequential pipeline spends the review budget in a predictable order.
+# Cheap verification and formatting retain headroom in RequestBudget.
+DISCOVERY_ORDER = ("adversarial", "design", "tests", "public_contract",
+                   "developer_notes", "state")
+STAGE_LIMITS = {
+    "independent": (12, 4_000),
+    "adversarial": (12, 4_000),
+    "verifier": (24, 8_000),
+}
 
-def run_focused_review(api_key, name, prompt, review, snapshot, bot_config, prompt_config, on_response=None):
-    stage_debug = {}
-    answer = openai_review(api_key, review, snapshot, bot_config, prompt_config,
-                           stage_debug, prompt=prompt, model=prompt_config.models[name],
-                           tools=FOCUSED_TOOLS, max_tool_calls=MAX_FOCUSED_TOOL_CALLS,
-                           first_tool_required=False, stage_name=name,
-                           on_response=on_response)
-    turns = stage_debug["turns"]
-    record = {"name": name, "model": prompt_config.models[name], "status": "completed",
-              "input_tokens": sum(turn.get("input_tokens") or 0 for turn in turns),
-              "cached_tokens": sum(turn.get("cached_tokens") or 0 for turn in turns),
-              "cache_write_tokens": sum(turn.get("cache_write_tokens") or 0 for turn in turns),
-              "output_tokens": sum(turn.get("output_tokens") or 0 for turn in turns),
-              "elapsed_seconds": sum(turn["elapsed_seconds"] for turn in turns),
-              "tool_calls": len(stage_debug["tools"]),
-              "response_output_sha256": hashlib.sha256(answer.encode()).hexdigest(),
-              "output_truncated": len(answer.encode()) > MAX_AUDIT_OUTPUT_BYTES}
-    if record["output_truncated"]:
-        answer = answer.encode()[:MAX_AUDIT_OUTPUT_BYTES].decode(errors="replace")
-        answer += "\n[Audit output truncated]"
-    return answer, record
 
-def run_audits(api_key, review, snapshot, bot_config, prompt_config, debug, on_response=None):
-    prompts = prompt_config.audit_prompts
-    models = prompt_config.models
-    notes = audit_developer_notes(snapshot)
-    with ThreadPoolExecutor(max_workers=len(AUDIT_NAMES)) as pool:
-        futures = {}
-        for name in AUDIT_NAMES:
-            prompt = prompts["common"] + "\n\n" + prompts[name]
-            input_text = focused_review_input(review, snapshot, name)
-            if name in TOOLED_AUDITS:
-                futures[name] = pool.submit(run_focused_review, api_key, name,
-                                            prompt, input_text, snapshot, bot_config,
-                                            prompt_config, on_response)
+def review_with_independent_passes(api_key, review, snapshot, bot_config,
+                                  prompt_config, current_pr, debug,
+                                  on_response=None, budget=None, is_current=None,
+                                  routing_mode="enabled", allow_discussions=True):
+    stages = debug.setdefault("stages", {})
+    outputs = debug.setdefault("stage_outputs", {})
+    limitations = []
+    candidates = []
+    debug["pipeline_stage"] = "routing"
+    plan = routing.plan_review(api_key, review, snapshot, prompt_config, debug,
+                               routing_mode, budget, is_current)
+    notes = None
+
+    def run_stage(name, input_text, prompt, schema, *, tools=True):
+        debug["pipeline_stage"] = name
+        record = {"model": prompt_config.models[name], "status": "running",
+                  "turns": [], "tools": []}
+        stages[name] = record
+        try:
+            if tools:
+                calls, output_tokens = STAGE_LIMITS.get(name, (6, 4_000))
+                answer = model.openai_review(
+                    api_key, input_text, snapshot, bot_config, prompt_config,
+                    record, current_pr=current_pr, prompt=prompt,
+                    model=prompt_config.models[name],
+                    tools=model.TOOLS if name in STAGE_LIMITS else model.FOCUSED_TOOLS,
+                    max_tool_calls=calls, max_output_tokens=output_tokens,
+                    first_tool_required=name in STAGE_LIMITS,
+                    stage_name=name, on_response=on_response, budget=budget,
+                    response_schema=schema, allow_discussions=allow_discussions,
+                    is_current=is_current)
             else:
-                futures[name] = pool.submit(run_audit, api_key, name,
-                                            prompt, input_text, prompt_config, notes,
-                                            on_response)
-        results = []
-        records = []
-        stage_outputs = {}
-        for name, future in futures.items():
-            try:
-                answer, record = future.result()
-            except Exception as exc:
-                answer = "Audit unavailable."
-                record = {"name": name, "model": models[name], "status": "failed",
-                          "error_type": type(exc).__name__}
-                if isinstance(exc, urllib.error.HTTPError):
-                    record["http_status"] = exc.code
-            records.append(record)
-            results.append(f"{name}:\n{answer}")
-            stage_outputs[name] = answer
-    debug["audits"] = records
-    debug["stage_outputs"] = stage_outputs
-    return "Focused reviews:\n" + "\n\n".join(results)
+                answer, response = model.run_audit(
+                    api_key, name, prompt, input_text, prompt_config,
+                    on_response=on_response, budget=budget,
+                    response_schema=schema, is_current=is_current, debug=record)
+                if response["status"] != "completed":
+                    raise protocol.InvalidReview("Stage response was incomplete")
+            outputs[name] = answer
+            record["raw_output"] = answer
+            record["status"] = "completed"
+            return answer
+        except model.StaleReview:
+            record["status"] = "stale"
+            raise
+        except Exception as exc:
+            record["status"] = "budget_exhausted" if isinstance(exc, BudgetExceeded) else "failed"
+            record["error_type"] = type(exc).__name__
+            if record.get("raw_output"):
+                outputs[name] = record["raw_output"]
+            raise
 
-def review_with_independent_passes(api_key, review, snapshot, bot_config, prompt_config, current_pr, debug, on_response=None):
-    debug["pipeline_stage"] = "independent"
-    sol_debug = {}
-    adversarial_debug = {}
-    debug["adversarial"] = adversarial_debug
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        audits_future = pool.submit(run_audits, api_key, review, snapshot, bot_config,
-                                    prompt_config, debug, on_response)
-        sol_future = pool.submit(openai_review, api_key, review, snapshot,
-                                 bot_config, prompt_config, sol_debug, current_pr,
-                                 on_response=on_response)
-        adversarial_future = pool.submit(
-            openai_review, api_key, review, snapshot, bot_config, prompt_config,
-            adversarial_debug, current_pr,
-            prompt=prompt_config.audit_prompts["adversarial"],
-            model=prompt_config.models["adversarial"], stage_name="adversarial",
-            on_response=on_response)
-        sol_review = sol_future.result()
-        adversarial_review = adversarial_future.result()
-        luna_reviews = audits_future.result()
-    debug.update(sol_debug)
-    stage_outputs = debug.setdefault("stage_outputs", {})
-    stage_outputs["independent"] = sol_review
-    stage_outputs["adversarial"] = adversarial_review
-    debug["independent_review_sha256"] = hashlib.sha256(sol_review.encode()).hexdigest()
-    debug["adversarial_review_sha256"] = hashlib.sha256(
-        adversarial_review.encode()).hexdigest()
-    reviews = (f"Independent review:\n{sol_review}\n\n"
-               f"Adversarial review:\n{adversarial_review}\n\n{luna_reviews}")
+    def discover(name):
+        nonlocal notes
+        prompt = (prompt_config.instructions if name == "independent"
+                  else prompt_config.audit_prompts[name])
+        prompt = prompt_config.audit_prompts["common"] + "\n\n" + prompt
+        input_text = review if name in STAGE_LIMITS else focused_review_input(review, snapshot, name)
+        if name == "developer_notes":
+            if notes is None:
+                notes = audit_developer_notes(snapshot)
+            input_text += "\n\nMerge-base developer notes:\n" + notes
+        try:
+            answer = run_stage(name, input_text, prompt, protocol.DISCOVERY_SCHEMA)
+            result = protocol.discovery(answer, name, snapshot)
+            stages[name]["coverage"] = result["coverage"]
+            candidates.extend(result["findings"])
+            if result["coverage"]["status"] == "partial":
+                limitations.append(f"The {name} review had incomplete evidence.")
+            return result["requires_sensitive_review"]
+        except model.StaleReview:
+            raise
+        except Exception as exc:
+            record = stages[name]
+            if record["status"] == "completed":
+                record.update(status="invalid", error_type=type(exc).__name__)
+            limitations.append(f"The {name} review did not complete.")
+            return False
 
-    debug["pipeline_stage"] = "verification"
-    verification_debug = {}
-    debug["verification"] = verification_debug
-    verified = openai_review(
-        api_key, review + "\n\nIndependent candidate reviews:\n" + reviews,
-        snapshot, bot_config, prompt_config, verification_debug, current_pr,
-        prompt=prompt_config.audit_prompts["verifier"],
-        model=prompt_config.models["verifier"],
-        max_output_tokens=MAX_VERIFIER_OUTPUT_TOKENS, stage_name="verifier",
-        on_response=on_response)
-    stage_outputs["verifier"] = verified
-    debug["verification_output_sha256"] = hashlib.sha256(verified.encode()).hexdigest()
+    sensitive = discover("independent")
+    selected = set(plan["audits"])
+    if sensitive and plan["tier"] != "sensitive":
+        selected.update(AUDIT_NAMES)
+        plan = {**plan, "tier": "sensitive", "audits": list(AUDIT_NAMES),
+                "evidence": plan["evidence"] + ["Overview requested sensitive review"]}
+        debug["routing"]["selected"] = plan
+    if plan["tier"] == "sensitive":
+        selected.add("adversarial")
+    for name in DISCOVERY_ORDER:
+        if name in selected:
+            escalate = discover(name)
+            if (escalate and name != "adversarial"
+                    and stages.get("adversarial", {}).get("status") in {None, "skipped"}):
+                discover("adversarial")
+                selected.add("state")
+                debug["routing"]["escalated_by"] = name
+        else:
+            stages[name] = {"model": prompt_config.models[name], "status": "skipped",
+                            "turns": [], "tools": []}
 
-    debug["pipeline_stage"] = "collation"
-    content, record = run_audit(api_key, "collator",
-                                prompt_config.audit_prompts["collator"],
-                                reviews + "\n\nVerification decisions:\n" + verified,
-                                prompt_config, on_response=on_response)
-    stage_outputs["collator"] = content
-    debug["collator"] = record
-    if record["status"] != "completed" or record["output_truncated"]:
-        raise ValueError("collator did not return a complete comment")
-    debug.pop("pipeline_stage")
-    return content
+    if is_current is not None and not is_current():
+        raise model.StaleReview()
+    accepted = []
+    try:
+        verified = run_stage(
+            "verifier", review + "\n\nCandidate findings:\n" + json.dumps(candidates),
+            prompt_config.audit_prompts["verifier"], protocol.VERIFIER_SCHEMA)
+        result, accepted = protocol.verification(verified, candidates, snapshot)
+        stages["verifier"]["coverage"] = result["coverage"]
+        debug["decisions"] = result["decisions"]
+        if result["coverage"]["status"] == "partial":
+            limitations.append("Verification had incomplete evidence.")
+        if any(item["disposition"] == "unresolved" for item in result["decisions"]):
+            limitations.append("Some candidate findings remain unresolved.")
+    except model.StaleReview:
+        raise
+    except Exception as exc:
+        if stages["verifier"]["status"] == "completed":
+            stages["verifier"].update(status="invalid", error_type=type(exc).__name__)
+        limitations.append("Verification did not complete; no unverified findings were published.")
+
+    # The editor sees only accepted findings. A failed editor can use the
+    # verifier's own wording, without discarding paid verification work.
+    findings = accepted
+    if accepted:
+        try:
+            edited = run_stage("collator", json.dumps({"findings": accepted}),
+                               prompt_config.audit_prompts["collator"],
+                               protocol.COLLATOR_SCHEMA, tools=False)
+            findings = protocol.collation(edited, accepted)
+        except model.StaleReview:
+            raise
+        except Exception as exc:
+            if stages["collator"]["status"] == "completed":
+                stages["collator"].update(status="invalid", error_type=type(exc).__name__)
+            stages["collator"]["used_verified_wording"] = True
+    else:
+        stages["collator"] = {"model": prompt_config.models["collator"],
+                              "status": "skipped", "turns": [], "tools": [],
+                              "reason": "No accepted findings to edit"}
+
+    debug["coverage"] = {"status": "partial" if limitations else "complete",
+                         "limitations": limitations}
+    if budget is not None:
+        debug["budget"] = budget.summary()
+    debug.pop("pipeline_stage", None)
+    return protocol.render(findings, limitations)
