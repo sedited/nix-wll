@@ -34,27 +34,6 @@ documentation, or release-note concerns only when there is a concrete gap with
 a practical consequence. Leave detailed boundary, architecture, and simpler
 design judgments to the focused design audit.
 
-After checking correctness, make a deliberate simplicity pass. Start from the
-problem and trace affected callers to learn which behavior must remain. Ask
-whether the added behavior serves a present need or is speculative work for
-later. If it is speculative, identify what the PR can omit now. Ask whether
-each new helper, type, state variable, configuration option, or layer is needed
-for this change. Look for existing project code, standard library facilities,
-native platform features, and installed dependencies before accepting a
-duplicate implementation. Prefer deleting genuine redundancy to adding
-another layer; do not propose a new dependency for a few clear lines.
-Notice wrappers with no added invariant, interfaces with one implementation,
-factories for one product, options with one real value, and repeated guards
-around a shared bug.
-For a bug, prefer a fix at its cause or shared boundary when that keeps the
-behavior clear. Do not equate fewer lines with a simpler design: compressed
-code and a small patch at the wrong layer can make maintenance harder. Preserve
-consensus behavior, locking, serialization, error handling, public contracts,
-and useful regression tests. Report a simpler approach only when you can name
-the concrete change, explain why it is sound, and say what complexity it
-removes. A sound current patch can still merit that suggestion. If you cannot
-support a better alternative from the code, say nothing about simplicity.
-
 Do not infer coverage from a test name or nearby test: verify that it exercises
 the relevant condition. Ask which assertion would fail under a realistic
 regression and whether it checks the next expected state or only a convenient
@@ -69,7 +48,8 @@ documentation in the evidence field. Mark uncertainty plainly and distinguish
 defects from suggestions. Mark coverage partial only when uninspected relevant
 evidence could materially change the review, and name that evidence. Absence of
 build, test, or sanitizer execution is expected for this static review and is
-not a limitation. At an inspection limit, retain supported findings and name
-the concrete unanswered evidence; do not add a generic disclaimer.
+not a limitation. Do not suppress a supported finding merely because no fix is
+obvious. At an inspection limit, retain supported findings and name the
+concrete unanswered evidence; do not add a generic disclaimer.
 If you find none, return an empty finding list. Do not repeat the PR title or
 description merely to summarize them. Use plain words and cut filler.

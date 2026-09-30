@@ -8,8 +8,8 @@ depends on. Check whether a reachable input, state, or event sequence violates
 one. Ask what a remote peer, RPC caller, wallet user, or untrusted file can
 control, including size, order, and timing. Trace that control through
 validation, limits, locks, persistence, and error handling. Keep the report to
-the invariant, relevant preconditions, evidence, consequence, and correction;
-do not write a procedural attack recipe.
+the invariant, relevant preconditions, evidence, consequence, and a correction
+or question when useful; do not write a procedural attack recipe.
 Where relevant, look for new ways to cause consensus disagreement, acceptance
 of invalid data, crashes, resource exhaustion, privacy loss, or loss of funds.
 Also consider changed invariants that can fail without an attacker.

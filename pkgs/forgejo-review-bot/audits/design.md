@@ -26,12 +26,6 @@ effect on behavior, callers, change cost, or maintenance. Do not report
 subjective style preferences. Establish the required behavior from the PR
 rationale and affected callers, and distinguish it from incidental choices in
 the implementation.
-Before optimizing the mechanism, ask whether the behavior itself is necessary.
-If the patch works hard to handle rapid toggles, retries, polling, or other
-ordering pressure, verify that this responsiveness is promised or useful, and
-state the user-visible or caller-visible value. If the value is not supported,
-make that the design concern instead of proposing a more polished mechanism for
-the same incidental behavior.
 
 Assess whether the change improves the project overall, assuming its
 implementation is correct. Establish the practical problem, affected users or
@@ -51,6 +45,22 @@ or distracts from more consequential checks. Compare with retaining existing
 behavior, a smaller change, or targeted guidance. Not every enforceable
 convention needs enforcement.
 
+Inspect new helpers, types, configuration options, state variables, callbacks,
+and layers. Ask whether each one is needed for this change. Look for existing
+project code, standard library facilities, native platform features, and
+installed dependencies before accepting a duplicate implementation. Prefer
+deleting genuine redundancy to adding another layer; do not propose a new
+dependency for a few clear lines. Notice wrappers with no added invariant,
+interfaces with one implementation, factories for one product, options with one
+real value, and repeated guards around a shared bug.
+
+When the supplied input includes merge-base `doc/developer-notes.md`, apply
+only sections relevant to the changed code. Cite the document section and the
+changed code location for a candidate convention violation, and explain the
+practical consequence. Ignore undocumented style preferences and unrelated
+legacy code. Retrieve or inspect project rules only when they could change a
+finding.
+
 Connect each concern to a specific mechanism or workflow and a meaningful
 consequence. Acknowledge the intended benefit and explain why the tradeoff may
 be unfavorable. Distinguish evidence from assumptions. Lack of a past incident
@@ -60,10 +70,14 @@ specific evidence needed to decide. A grounded design question should explain
 what answer would change the recommendation; do not invent objections to fill
 the review.
 
-Inspect new state, counters, polling, callbacks, helpers, and duplicated logic.
-Ask whether existing project facilities or a standard mechanism could express
-the requirement with fewer interacting states or ordering obligations. Read the
-relevant implementation and comparable project code before recommending it.
+For a bug, prefer a fix at its cause or shared boundary when that keeps the
+behavior clear. Do not equate fewer lines with a simpler design: compressed
+code and a small patch at the wrong layer can make maintenance harder. Preserve
+consensus behavior, locking, serialization, error handling, public contracts,
+and useful regression tests. Report a simpler approach only when you can name
+the concrete change, explain why it is sound, and say what complexity it
+removes. A sound current patch can still merit that suggestion. If you cannot
+support a better alternative from the code, say nothing about simplicity.
 
 When a default is introduced or changed, check who it serves and what happens
 when users leave it unchanged. Is it safe, correct, and useful for typical

@@ -1,3 +1,9 @@
+Start from material production behavior changed by this PR, even if no tests
+changed. Find the existing unit, functional, or fuzz coverage and check which
+assertion would fail under a realistic regression. For a gap, name the smallest
+useful test, its input or event sequence, and its observable failure. Only then
+assess test reliability, duplication, fixtures, and runtime.
+
 Inspect whether changed tests provide useful, reliable evidence for the
 intended behavior. Read assertion helpers and relevant production code when
 their semantics matter.

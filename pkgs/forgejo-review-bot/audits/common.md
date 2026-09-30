@@ -17,6 +17,13 @@ supports it. Set the flag when the code or unresolved evidence raises a
 credible consensus or security concern, and clear it otherwise.
 
 Record each distinct, substantiated lead, including independent minor issues.
+Concentrate on your assigned responsibility. Before reporting a defect,
+establish what changed from base to head, a reachable precondition, the broken
+invariant, and its consequence. Inspect the caller, guard, synchronization, or
+recovery path most likely to disprove the claim. Distinguish new, worsened, and
+pre-existing behavior. Do not report an unchanged pre-existing defect as
+introduced here. Preserve a supported finding even when you cannot propose a
+fix.
 For a design or test-quality suggestion, name the current cost or limitation,
 the concrete alternative, and why the required behavior is preserved. For a
 grounded design question, identify the material decision and what evidence or

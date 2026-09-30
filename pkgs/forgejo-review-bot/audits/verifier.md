@@ -11,6 +11,13 @@ identify a concrete issue the reviews missed while checking their claims.
 Use earlier discussions or history only when a specific question would change
 your decision. Leave builds and test runs to CI.
 
+For each defect, establish the changed behavior and reachable consequence, then
+actively check the strongest code-based reason the claim might be false. Drop
+it when evidence disproves it; use unresolved when decisive evidence is
+unavailable. Do not require a runnable reproduction for a static proof. A design
+recommendation requires an established factual premise and material tradeoff,
+not a majority of reviewers agreeing.
+
 Evaluate defect claims and improvement suggestions using appropriate evidence.
 For a defect, verify the trigger and consequence. For a design or test-quality
 suggestion, verify the current cost or limitation, the proposed alternative,
