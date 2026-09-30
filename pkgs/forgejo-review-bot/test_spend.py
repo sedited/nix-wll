@@ -53,26 +53,34 @@ class SpendTests(unittest.TestCase):
         self.assertEqual(summary["incomplete_usage_count"], 1)
         self.assertGreater(summary["reserved_total_usd"], 0)
 
-    def test_reservations_enforce_review_limit_in_parallel(self):
-        ledger = Ledger(self.path, review_limit_usd=0.0008, input_padding_tokens=0)
-        barrier = threading.Barrier(2)
-        result = []
+    def test_reservations_enforce_limits_in_parallel(self):
+        for monthly in (False, True):
+            with self.subTest(monthly=monthly):
+                ledger = Ledger(self.path.with_name(f"parallel-{monthly}.sqlite3"),
+                                review_limit_usd=1 if monthly else 0.0008,
+                                monthly_limit_usd=0.0008 if monthly else None,
+                                input_padding_tokens=0)
+                barrier = threading.Barrier(2)
+                result = []
 
-        def reserve():
-            barrier.wait()
-            try:
-                result.append(ledger.reserve("audit", "gpt-6-luna",
-                                             self.payload(1000), "pr-2"))
-            except BudgetExceeded:
-                result.append("blocked")
+                def reserve(review_id):
+                    barrier.wait(timeout=5)
+                    try:
+                        result.append(ledger.reserve("audit", "gpt-6-luna",
+                                                     self.payload(1000), review_id))
+                    except BudgetExceeded:
+                        result.append("blocked")
 
-        threads = [threading.Thread(target=reserve) for _ in range(2)]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join()
-        self.assertEqual(result.count("blocked"), 1)
-        self.assertEqual(ledger.summary(review_id="pr-2")["unknown_request_count"], 1)
+                review_ids = ("pr-2", "pr-3" if monthly else "pr-2")
+                threads = [threading.Thread(target=reserve, args=(review_id,))
+                           for review_id in review_ids]
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join()
+                self.assertEqual(result.count("blocked"), 1)
+                self.assertEqual(len(result), 2)
+                self.assertEqual(ledger.summary()["unknown_request_count"], 1)
 
     def test_settlement_deduplicates_response_and_known_refund_releases_reservation(self):
         ledger = Ledger(self.path, review_limit_usd=0.001, input_padding_tokens=0)

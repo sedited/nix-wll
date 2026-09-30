@@ -19,6 +19,7 @@ from .jobs import JobStore
 from .repository import BRANCH, SHA
 
 MAX_BODY = 1024 * 1024
+CHECKOUT_LOCK = threading.Lock()
 
 def valid_signature(body, header, secret):
     if not header:
@@ -104,6 +105,7 @@ def process_job(job, jobs, state_dir, api_key, forgejo_token, bot_login,
     action = job["action"]
     force = job["force"]
     checkout = state_dir / "checkout"
+    ref_prefix = f'refs/review-bot/jobs/{job["id"]}-{job["generation"]}'
     started = time.monotonic()
     debug = {}
     content = ""
@@ -131,22 +133,23 @@ def process_job(job, jobs, state_dir, api_key, forgejo_token, bot_login,
                 title, description = forgejo.pull_request_context(
                     bot_config, forgejo_token, number)
                 stage = "collect"
-                base_sha, head_sha, review, skip = repository.collect_review(
-                    checkout, number, base_ref, expected_head, title, description,
-                    bot_config)
-                if head_sha != expected_head:
-                    if jobs.is_current(job):
-                        jobs.enqueue(number, base_ref, head_sha, action, force)
-                    raise model.StaleReview("PR head changed during fetch")
-                if (forgejo.comment_matches_head(comment, head_sha)
-                        and f"Base: `{base_sha}`" in [line.strip() for line in comment["body"].splitlines()[:5]]):
-                    jobs.complete(job)
-                    outcome = "already-reviewed"
-                    return outcome
+                with CHECKOUT_LOCK:
+                    base_sha, head_sha, review, skip = repository.collect_review(
+                        checkout, number, base_ref, expected_head, title, description,
+                        bot_config, ref_prefix=ref_prefix)
+                    if head_sha != expected_head:
+                        if jobs.is_current(job):
+                            jobs.enqueue(number, base_ref, head_sha, action, force)
+                        raise model.StaleReview("PR head changed during fetch")
+                    if (forgejo.comment_matches_head(comment, head_sha)
+                            and f"Base: `{base_sha}`" in [line.strip() for line in comment["body"].splitlines()[:5]]):
+                        jobs.complete(job)
+                        outcome = "already-reviewed"
+                        return outcome
+                    snapshot = (None if skip else repository.snapshot_repository(
+                        checkout, base_sha, head_sha))
                 debug = {"skip": skip} if skip else {}
                 stage = "model"
-                snapshot = (None if skip else repository.snapshot_repository(
-                    checkout, base_sha, head_sha))
                 content = (f"Skipped: {skip}" if skip else
                            pipeline.review_with_independent_passes(
                                api_key, review, snapshot, bot_config, prompt_config,
@@ -195,6 +198,13 @@ def process_job(job, jobs, state_dir, api_key, forgejo_token, bot_login,
             outcome = "lost-claim"
         return outcome
     finally:
+        if (checkout / ".git").exists():
+            try:
+                with CHECKOUT_LOCK:
+                    repository.release_review_refs(checkout, ref_prefix)
+            except (OSError, subprocess.SubprocessError) as exc:
+                logging.warning("Could not release review refs for PR %d: %s",
+                                number, type(exc).__name__)
         if debug and "budget" not in debug:
             try:
                 debug["budget"] = budget.summary()
@@ -311,6 +321,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--listen", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--workers", type=int, default=3,
+                        help="Maximum concurrent pull request reviews")
     parser.add_argument("--state-dir", type=Path, required=True)
     parser.add_argument("--origin", required=True,
                         help="Git remote URL used to fetch the base branch and PR heads")
@@ -337,6 +349,8 @@ def main():
     parser.add_argument("--routing-mode", choices=("enabled", "shadow", "full"),
                         default="enabled")
     args = parser.parse_args()
+    if args.workers < 1:
+        parser.error("workers must be positive")
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     bot_config = config.BotConfig(args.origin, args.repository, args.forgejo_api,
                                   args.repository_url, args.comment_marker)
@@ -354,10 +368,11 @@ def main():
     ledger = spend.Ledger(args.state_dir / "spend.sqlite3",
                           review_limit_usd=args.review_budget_usd,
                           monthly_limit_usd=args.monthly_budget_usd)
-    logging.info("review queue recovered_claims=%d", recovered)
-    threading.Thread(target=worker, args=(jobs, args.state_dir, api_key,
-                                          forgejo_token, args.bot_login,
-                                          bot_config, prompt_config, ledger,
-                                          args.routing_mode), daemon=True).start()
+    logging.info("review queue recovered_claims=%d workers=%d", recovered, args.workers)
+    for index in range(args.workers):
+        threading.Thread(target=worker, name=f"review-{index + 1}",
+                         args=(jobs, args.state_dir, api_key, forgejo_token,
+                               args.bot_login, bot_config, prompt_config, ledger,
+                               args.routing_mode), daemon=True).start()
     server = ThreadingHTTPServer((args.listen, args.port), make_handler(secret, jobs, bot_config))
     server.serve_forever()

@@ -10,6 +10,15 @@ reads, per-file diff reads, and literal code search. Large patches are replaced
 by a changed-file list so the model can read relevant diffs on demand. It never
 builds, runs, or tests pull request code.
 
+Three worker threads review different PRs concurrently by default. Set
+`services.forgejoReviewBot.workers` (or `--workers`) to change this limit.
+Reviews of the same PR run serially; newer heads wait for the active attempt to
+finish. Fetches and snapshot creation share a lock in one Git object store.
+Each active review pins its own base and head refs until it finishes, and tools
+read immutable blobs without a checked-out worktree. Model calls run outside
+the Git lock. Spending reservations remain atomic across all workers, including
+the shared monthly allowance.
+
 The model can also search and read other public issues and pull requests in the
 same repository, including a small sample of ordinary comments. The current PR
 is excluded from these tools, so its comments cannot influence the review.

@@ -15,6 +15,8 @@ let
     cfg.listenAddress
     "--port"
     (toString cfg.port)
+    "--workers"
+    (toString cfg.workers)
     "--state-dir"
     cfg.stateDir
     "--origin"
@@ -115,6 +117,12 @@ in
       type = lib.types.nullOr lib.types.path;
       default = null;
       description = "Optional replacement for auditPromptDir/models.json.";
+    };
+
+    workers = lib.mkOption {
+      type = lib.types.ints.positive;
+      default = 3;
+      description = "Maximum concurrent PR reviews. Reviews of the same PR run serially.";
     };
 
     reviewBudgetUsd = lib.mkOption {

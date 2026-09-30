@@ -9,6 +9,7 @@ import unittest
 import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
@@ -84,6 +85,46 @@ class ServiceTests(unittest.TestCase):
         with patch.object(self.jobs, "enqueue", side_effect=sqlite3.OperationalError("full")):
             with self.assertLogs(level="ERROR"):
                 self.assertEqual(self.post_webhook(self.jobs), 503)
+        self.assertIsNone(self.jobs.claim())
+
+    def test_distinct_pr_reviews_overlap_outside_git_lock(self):
+        (self.state_dir / "checkout" / ".git").mkdir(parents=True)
+        for number in (42, 43):
+            self.jobs.enqueue(number, "master", "a" * 40, "synchronize")
+        claimed = [self.jobs.claim(), self.jobs.claim()]
+        barrier = threading.Barrier(2)
+        prefixes = []
+
+        def collect(*args, ref_prefix):
+            self.assertTrue(service.CHECKOUT_LOCK.locked())
+            prefixes.append(ref_prefix)
+            return "b" * 40, "a" * 40, "review input", None
+
+        def snapshot(*args):
+            self.assertTrue(service.CHECKOUT_LOCK.locked())
+            return object()
+
+        def review(*args, **kwargs):
+            barrier.wait(timeout=5)
+            return "Review content"
+
+        with (patch.object(service.repository, "current_head", return_value="a" * 40),
+              patch.object(service.forgejo, "find_comment", return_value=None),
+              patch.object(service.forgejo, "pull_request_context",
+                           return_value=("Title", "Description")),
+              patch.object(service.repository, "collect_review", side_effect=collect),
+              patch.object(service.repository, "snapshot_repository", side_effect=snapshot),
+              patch.object(service.pipeline, "review_with_independent_passes",
+                           side_effect=review),
+              patch.object(service.forgejo, "publish_review",
+                           return_value="published") as publish,
+              patch.object(service.repository, "release_review_refs") as release,
+              ThreadPoolExecutor(max_workers=2) as pool):
+            self.assertEqual(list(pool.map(self.process, claimed)),
+                             ["published", "published"])
+        self.assertEqual(len(set(prefixes)), 2)
+        self.assertEqual({call.args[1] for call in release.call_args_list}, set(prefixes))
+        self.assertEqual({call.args[3] for call in publish.call_args_list}, {42, 43})
         self.assertIsNone(self.jobs.claim())
 
     def test_publication_retry_reuses_saved_result(self):
@@ -175,7 +216,7 @@ class ServiceTests(unittest.TestCase):
     def test_fetch_head_change_does_not_replace_newer_pending_job(self):
         old = self.enqueue()
 
-        def collect(*_args):
+        def collect(*_args, **_kwargs):
             self.jobs.enqueue(42, "master", "c" * 40, "synchronize")
             return "d" * 40, "b" * 40, None, "PR head changed before review"
 
