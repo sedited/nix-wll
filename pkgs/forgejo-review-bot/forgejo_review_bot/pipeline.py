@@ -33,6 +33,7 @@ def review_with_independent_passes(api_key, review, snapshot, bot_config,
     outputs = debug.setdefault("stage_outputs", {})
     limitations = []
     candidates = []
+    candidate_sources = debug.setdefault("candidate_sources", {})
     plan = {"tier": "sensitive"}
 
     def verifier_input():
@@ -122,6 +123,7 @@ def review_with_independent_passes(api_key, review, snapshot, bot_config,
             result = protocol.discovery(answer, name, snapshot)
             stages[name]["coverage"] = result["coverage"]
             candidates.extend(result["findings"])
+            candidate_sources.update({finding["id"]: name for finding in result["findings"]})
             if result["coverage"]["status"] == "partial":
                 limitations.append(f"The {name} review had incomplete evidence.")
             return result["requires_sensitive_review"]
@@ -167,6 +169,7 @@ def review_with_independent_passes(api_key, review, snapshot, bot_config,
     if is_current is not None and not is_current():
         raise model.StaleReview()
     accepted = []
+    finding_candidates = {}
     try:
         verified = run_stage(
             "verifier", verifier_input(),
@@ -174,6 +177,10 @@ def review_with_independent_passes(api_key, review, snapshot, bot_config,
         result, accepted = protocol.verification(verified, candidates, snapshot)
         stages["verifier"]["coverage"] = result["coverage"]
         debug["decisions"] = result["decisions"]
+        published = [decision for decision in result["decisions"]
+                     if decision["disposition"] == "publish"]
+        finding_candidates = {finding["id"]: decision["candidate_ids"]
+                              for finding, decision in zip(accepted, published)}
         if result["validation_errors"]:
             stages["verifier"]["validation_errors"] = result["validation_errors"]
             limitations.append("Some findings failed validation and were withheld.")
@@ -216,6 +223,17 @@ def review_with_independent_passes(api_key, review, snapshot, bot_config,
 
     debug["coverage"] = {"status": "partial" if limitations else "complete",
                          "limitations": limitations}
+    was_edited = (stages["collator"]["status"] == "completed"
+                  and not stages["collator"].get("used_verified_wording"))
+    debug["finding_attribution"] = [
+        {"finding_id": finding["id"],
+         **{key: finding[key] for key in ("title", "path", "line", "side")},
+         "candidate_ids": finding_candidates[finding["id"]],
+         "raised_by": sorted({candidate_sources[identifier]
+                              for identifier in finding_candidates[finding["id"]]}) or ["verifier"],
+         "verified_by": "verifier", "edited_by": "collator" if was_edited else None}
+        for finding in findings
+    ]
     if budget is not None:
         debug["budget"] = budget.summary()
     debug.pop("pipeline_stage", None)

@@ -4,7 +4,6 @@ import json
 import os
 import time
 
-from .model import MAX_OUTPUT_TOKENS, MAX_VERIFIER_OUTPUT_TOKENS, MAX_COLLATOR_OUTPUT_TOKENS
 from .spend import price_usd
 from .config import AUDIT_NAMES
 
@@ -27,6 +26,107 @@ def _public_value(value):
     return value
 
 
+def _turn_usage(turn, fallback_model):
+    usage = {"input_tokens": turn.get("input_tokens"),
+             "output_tokens": turn.get("output_tokens"),
+             "cached_tokens": turn.get("cached_tokens", 0),
+             "cache_write_tokens": turn.get("cache_write_tokens")}
+    return usage, price_usd(turn.get("model") or fallback_model, usage)
+
+
+def _stage_turn_metrics(stage):
+    priced = []
+    unknown_usage = 0
+    incomplete_usage = 0
+    for turn in stage.get("turns", []):
+        usage, cost = _turn_usage(turn, stage.get("model"))
+        if cost is None:
+            unknown_usage += 1
+        else:
+            priced.append(cost)
+            if turn.get("cache_write_tokens") is None:
+                incomplete_usage += 1
+    return {"known_estimated_cost_usd": float(sum(priced)) if priced else 0,
+            "unknown_usage_count": unknown_usage,
+            "incomplete_usage_count": incomplete_usage}
+
+
+def finding_attribution(debug):
+    attribution = debug.get("finding_attribution") or []
+    return list(attribution) if isinstance(attribution, list) else []
+
+
+def _new_stage_metrics(stage):
+    record = {"model": stage.get("model"),
+              "status": stage.get("status", "unknown"),
+              "calls": len(stage.get("turns", [])),
+              "tool_calls": len(stage.get("tools", [])),
+              "candidate_counts": {
+                  "publish": 0, "drop": 0, "unresolved": 0, "undisposed": 0},
+              "accepted_findings": 0,
+              "sole_source_findings": 0,
+              "shared_findings": 0}
+    if "profiles" in stage:
+        record["profiles"] = stage["profiles"]
+    record.update(_stage_turn_metrics(stage))
+    return record
+
+
+def stage_metrics(debug):
+    stages = debug.get("stages") or {}
+    candidate_sources = debug.get("candidate_sources") or {}
+    metrics = {name: _new_stage_metrics(stage)
+               for name, stage in stages.items() if isinstance(stage, dict)}
+
+    candidates_by_stage = {}
+    disposed_candidate_ids = set()
+    for decision in debug.get("decisions", []):
+        if not isinstance(decision, dict):
+            continue
+        disposition = decision.get("disposition")
+        if disposition not in {"publish", "drop", "unresolved"}:
+            continue
+        for candidate_id in decision.get("candidate_ids") or []:
+            if not isinstance(candidate_id, str):
+                continue
+            disposed_candidate_ids.add(candidate_id)
+            stage = candidate_sources.get(candidate_id)
+            if stage in metrics:
+                candidates_by_stage.setdefault(stage, {}).setdefault(
+                    disposition, set()).add(candidate_id)
+
+    for stage, disposition_ids in candidates_by_stage.items():
+        for disposition, candidate_ids in disposition_ids.items():
+            metrics[stage]["candidate_counts"][disposition] = len(candidate_ids)
+    for candidate_id, stage in candidate_sources.items():
+        if stage in metrics and candidate_id not in disposed_candidate_ids:
+            metrics[stage]["candidate_counts"]["undisposed"] += 1
+
+    findings_by_stage = {}
+    for finding in finding_attribution(debug):
+        if not isinstance(finding, dict):
+            continue
+        finding_id = finding.get("finding_id")
+        if not finding_id:
+            continue
+        raised_by = finding.get("raised_by") or []
+        shared = len(set(raised_by)) > 1
+        for stage in set(raised_by):
+            if stage in metrics:
+                findings_by_stage.setdefault(stage, {"accepted": set(), "sole": set(),
+                                                    "shared": set()})
+                findings_by_stage[stage]["accepted"].add(finding_id)
+                findings_by_stage[stage]["shared" if shared else "sole"].add(finding_id)
+
+    for stage, counts in findings_by_stage.items():
+        record = metrics[stage]
+        record["accepted_findings"] = len(counts["accepted"])
+        record["sole_source_findings"] = len(counts["sole"])
+        record["shared_findings"] = len(counts["shared"])
+
+    return {name: metrics[name] for name in sorted(metrics)}
+
+
 def review_metrics(debug, prompt_config):
     stages = debug.get("stages", {})
     turns = [(turn, stage.get("model")) for stage in stages.values()
@@ -38,12 +138,7 @@ def review_metrics(debug, prompt_config):
     input_tokens = output_tokens = 0
     total_seconds = 0.0
     for turn, fallback_model in turns:
-        model = turn.get("model") or fallback_model
-        usage = {"input_tokens": turn.get("input_tokens"),
-                 "output_tokens": turn.get("output_tokens"),
-                 "cached_tokens": turn.get("cached_tokens", 0),
-                 "cache_write_tokens": turn.get("cache_write_tokens")}
-        cost = price_usd(model, usage)
+        usage, cost = _turn_usage(turn, fallback_model)
         if cost is None:
             unknown_usage += 1
         else:
@@ -75,14 +170,15 @@ def review_trace(debug, prompt_config):
     prompt = prompt_config.instructions
     metrics = review_metrics(debug, prompt_config)
     trace = {"models": prompt_config.models, "endpoint": "/v1/responses", "store": False,
-             "max_output_tokens": MAX_OUTPUT_TOKENS,
-             "verifier_max_output_tokens": MAX_VERIFIER_OUTPUT_TOKENS,
-             "collator_max_output_tokens": MAX_COLLATOR_OUTPUT_TOKENS,
              "instructions": debug.get("instructions", prompt),
              "input": "PR text, patch, and commits omitted from public debug output",
              "stages": _public_value(debug.get("stages", {})),
              "budget": debug.get("budget")}
-    for key in ("routing", "coverage"):
+    attribution = finding_attribution(debug)
+    if attribution:
+        trace["finding_attribution"] = attribution
+    trace["stage_metrics"] = stage_metrics(debug)
+    for key in ("routing", "coverage", "candidate_sources", "verification_budget"):
         if key in debug:
             trace[key] = debug[key]
     if debug.get("stage_outputs"):
@@ -112,10 +208,48 @@ def review_trace(debug, prompt_config):
                              "counts use the conservative cache-write rate.")
     return trace
 
+
+def _html_cell(value):
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        value = ", ".join(str(item) for item in value)
+    return html.escape(str(value))
+
+
+def _attribution_table(attribution):
+    if not attribution:
+        return ""
+    rows = []
+    for finding in attribution:
+        location = ""
+        if finding.get("path") and finding.get("line") and finding.get("side"):
+            location = f"{finding['path']}:{finding['line']} ({finding['side']})"
+        rows.append(
+            "<tr>"
+            f"<td>{_html_cell(finding.get('finding_id'))}</td>"
+            f"<td>{_html_cell(finding.get('title'))}</td>"
+            f"<td>{_html_cell(location)}</td>"
+            f"<td>{_html_cell(finding.get('raised_by'))}</td>"
+            f"<td>{_html_cell(finding.get('verified_by'))}</td>"
+            f"<td>{_html_cell(finding.get('edited_by'))}</td>"
+            f"<td>{_html_cell(finding.get('candidate_ids'))}</td>"
+            "</tr>")
+    return (
+        "<table>\n"
+        "<thead><tr><th>ID</th><th>Finding</th><th>Location</th>"
+        "<th>Raised by</th><th>Verified by</th><th>Edited by</th>"
+        "<th>Candidates</th></tr></thead>\n"
+        f"<tbody>{''.join(rows)}</tbody>\n"
+        "</table>\n\n")
+
+
 def debug_section(debug, prompt_config):
     trace = review_trace(debug, prompt_config)
+    table = _attribution_table(trace.get("finding_attribution", []))
     rendered = html.escape(json.dumps(trace, indent=2, ensure_ascii=True))
-    return f"\n<details><summary>Review debug</summary>\n\n<pre>{rendered}</pre>\n</details>\n"
+    return (f"\n<details><summary>Review debug</summary>\n\n"
+            f"{table}<pre>{rendered}</pre>\n</details>\n")
 
 def save_review_trace(state_dir, number, head_sha, content, debug, prompt_config):
     trace_dir = state_dir / "review-traces"
@@ -125,6 +259,9 @@ def save_review_trace(state_dir, number, head_sha, content, debug, prompt_config
               "stage_outputs": debug.get("stage_outputs", {}),
               "stages": debug.get("stages", {}),
               "budget": debug.get("budget"),
+              "candidate_sources": debug.get("candidate_sources", {}),
+              "decisions": debug.get("decisions", []),
+              "finding_attribution": debug.get("finding_attribution", []),
               "trace": review_trace(debug, prompt_config)}
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as file:

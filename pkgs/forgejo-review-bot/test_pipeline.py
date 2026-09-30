@@ -84,6 +84,8 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual([name for name, _ in self.calls], ["independent", "tests", "design", "verifier"])
         self.assertIn("Rejected claim", self.debug["stage_outputs"]["tests"])
         self.assertEqual(self.debug["coverage"]["status"], "complete")
+        self.assertEqual(self.debug["finding_attribution"][0]["raised_by"], ["design"])
+        self.assertEqual(self.debug["finding_attribution"][0]["edited_by"], "collator")
 
     def test_sensitive_discovery_uses_sol_and_failed_audit_keeps_partial_usage(self):
         self.tier, self.audits = "sensitive", ["design"]
@@ -210,6 +212,34 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(budget.payloads[2]["reasoning"]["effort"], "high")
         self.assertIn("independent:1", budget.payloads[2]["input"][0]["content"])
 
+    def test_attribution_retains_merged_sources_and_verifier_discovery_after_editing(self):
+        self.tier, self.audits = "standard", ["tests"]
+
+        def review(*args, **kwargs):
+            if kwargs["stage_name"] == "verifier":
+                return json.dumps({"coverage": COMPLETE, "decisions": [
+                    {"candidate_ids": ["independent:1", "tests:1"], "disposition": "publish",
+                     "reason": "Same root cause", "finding": self.published},
+                    {"candidate_ids": [], "disposition": "publish",
+                     "reason": "New verified issue", "finding": {
+                         **self.published, "title": "Verifier discovery"}}]})
+            return discovery([candidate()])
+
+        def edit(*args, **kwargs):
+            return json.dumps({"findings": [
+                {"id": "finding:2", "title": "Edited verifier finding", "body": "Verified text"},
+                {"id": "finding:1", "title": "Edited shared finding", "body": "Verified text"},
+            ]}), {"status": "completed"}
+
+        self.run_review(review, edit)
+        attribution = {item["finding_id"]: item for item in self.debug["finding_attribution"]}
+        self.assertEqual(attribution["finding:1"]["raised_by"], ["independent", "tests"])
+        self.assertEqual(attribution["finding:1"]["candidate_ids"], ["independent:1", "tests:1"])
+        self.assertEqual(attribution["finding:1"]["title"], "Edited shared finding")
+        self.assertEqual(attribution["finding:2"]["raised_by"], ["verifier"])
+        self.assertEqual(attribution["finding:2"]["candidate_ids"], [])
+        self.assertEqual(attribution["finding:2"]["title"], "Edited verifier finding")
+
     def test_missing_verifier_decision_never_publishes_candidate(self):
         self.tier, self.audits = "routine", []
 
@@ -273,6 +303,7 @@ class PipelineTests(unittest.TestCase):
                 self.assertIn(design["body"], content)
                 self.assertIn("Design and approach", content)
                 self.assertTrue(self.debug["stages"]["collator"]["used_verified_wording"])
+                self.assertIsNone(self.debug["finding_attribution"][0]["edited_by"])
 
 
 if __name__ == "__main__":
