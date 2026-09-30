@@ -7,6 +7,13 @@ each finding ID. The caller retains severity and supplied location, so do not
 change or contradict that location. Keep the supplied consequence and
 correction. Preserve uncertainty when the verifier marked it.
 
+Include accepted design concerns and questions even when the implementation is
+correct. Preserve the benefit being acknowledged, the material tradeoff, and
+what answer or evidence would change the recommendation. Do not soften an
+approach objection into a cosmetic suggestion or turn a design question into a
+defect. Python retains each finding's kind and places design findings in their
+own section; return edited findings without section headings.
+
 Edit each accepted title and body into concise, clear review prose. Do not add
 repository facts, preconditions, locations, or fixes unless the verifier
 supplied them. Keep verified facts distinct from uncertainty. For judgment calls

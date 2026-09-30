@@ -12,6 +12,33 @@ state the user-visible or caller-visible value. If the value is not supported,
 make that the design concern instead of proposing a more polished mechanism for
 the same incidental behavior.
 
+Assess whether the change improves the project overall, assuming its
+implementation is correct. Establish the practical problem, affected users or
+contributors, and intended outcome. Compare that outcome with what the code
+actually guarantees. Distinguish enabling an outcome from ensuring it happens,
+and checking an intermediate property from checking the result people need.
+
+Trace how the benefit arises in practice: who must use the mechanism, when it
+runs, what it skips, and what manual judgment remains. Assess how exceptions or
+adoption requirements limit the claimed benefit. Optional tools and partial
+improvements can still be worthwhile; assess their actual contribution.
+
+Count recurring procedure, documentation, configuration, exceptions,
+maintenance, confusion, and reviewer attention as costs. Identify who bears a
+material cost and how often. Check whether the change creates false confidence
+or distracts from more consequential checks. Compare with retaining existing
+behavior, a smaller change, or targeted guidance. Not every enforceable
+convention needs enforcement.
+
+Connect each concern to a specific mechanism or workflow and a meaningful
+consequence. Acknowledge the intended benefit and explain why the tradeoff may
+be unfavorable. Distinguish evidence from assumptions. Lack of a past incident
+does not prove preventive work unnecessary, and added code alone is not a
+sufficient objection. Suggest the smallest useful alternative or identify the
+specific evidence needed to decide. A grounded design question should explain
+what answer would change the recommendation; do not invent objections to fill
+the review.
+
 Inspect new state, counters, polling, callbacks, helpers, and duplicated logic.
 Ask whether existing project facilities or a standard mechanism could express
 the requirement with fewer interacting states or ordering obligations. Read the
@@ -28,9 +55,13 @@ how it could materially affect users. Do not demand benchmarks for harmless
 choices or treat every judgment call as a defect.
 
 Return the discovery object in the supplied schema, including coverage and
-limitations. For each grounded suggestion, identify the current cost, concrete
-alternative, required behavior it preserves, and any tradeoff or unresolved
-detail. A sound implementation can still merit a suggestion. Do not prefer
-fewer lines at the expense of clarity or correct synchronization. Do not invent
+limitations. Use kind `design` for approach, architecture, or workflow tradeoffs
+and questions, and `defect` for correctness failures. For each grounded
+suggestion, identify the current cost, concrete alternative, required behavior
+it preserves, and any tradeoff or unresolved detail. When the choice depends
+on missing requirements or measurements, state
+the decision they would settle rather than prescribing an unsupported fix.
+A sound implementation can still merit a suggestion. Do not prefer fewer lines
+at the expense of clarity or correct synchronization. Do not invent
 a bug or require a rewrite. Return no finding when you cannot support a useful
-alternative.
+alternative or material design question.

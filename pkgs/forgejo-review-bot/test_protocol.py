@@ -10,7 +10,7 @@ class ProtocolTests(unittest.TestCase):
         self.snapshot = SimpleNamespace(changed_paths={"src/example.cpp"},
                                         head_files={"src/example.cpp": "blob"},
                                         base_files={"src/example.cpp": "old"})
-        self.finding = {"severity": "suggestion", "path": "src/example.cpp",
+        self.finding = {"kind": "suggestion", "severity": "suggestion", "path": "src/example.cpp",
                         "line": 5, "side": "head", "title": "Consolidate duplicate setup",
                         "body": "Reuse the existing fixture while keeping the regression assertion."}
         self.coverage = {"status": "complete", "limitations": []}
@@ -35,16 +35,42 @@ class ProtocolTests(unittest.TestCase):
                                   candidates, self.snapshot)
 
     def test_collator_cannot_add_remove_or_duplicate_accepted_ids(self):
-        accepted = [{**self.finding, "id": "finding:1"}]
+        accepted = [{**self.finding, "id": "finding:1"},
+                    {**self.finding, "kind": "design", "id": "finding:2"}]
         for edits in ([], [{"id": "invented", "title": "New", "body": "Claim"}],
                       [{"id": "finding:1", "title": "A", "body": "B"}] * 2):
             with self.subTest(edits=edits), self.assertRaises(protocol.InvalidReview):
                 protocol.collation(json.dumps({"findings": edits}), accepted)
         edited = protocol.collation(json.dumps({"findings": [
-            {"id": "finding:1", "title": "Short title", "body": "Edited wording"}]}), accepted)
+            {"id": "finding:1", "title": "Short title", "body": "Edited wording"},
+            {"id": "finding:2", "title": "Design title", "body": "Design wording"}]}), accepted)
         self.assertEqual(edited[0]["path"], self.finding["path"])
         self.assertEqual(edited[0]["severity"], "suggestion")
+        self.assertEqual(edited[1]["kind"], "design")
         self.assertIn("incomplete", protocol.render(edited, ["A selected audit was unavailable."]))
+
+    def test_render_orders_design_after_critical_and_before_other_findings(self):
+        findings = [
+            {**self.finding, "kind": "suggestion", "title": "General suggestion"},
+            {**self.finding, "kind": "defect", "severity": "minor", "title": "Minor bug"},
+            {**self.finding, "kind": "design", "title": "Design concern"},
+            {**self.finding, "kind": "defect", "severity": "critical", "title": "Critical bug"},
+        ]
+        rendered = protocol.render(findings)
+        self.assertEqual(rendered.count("Design concern"), 1)
+        self.assertLess(rendered.index("Critical bug"), rendered.index("Design and approach"))
+        self.assertLess(rendered.index("Design concern"), rendered.index("Minor bug"))
+        self.assertLess(rendered.index("Minor bug"), rendered.index("General suggestion"))
+        self.assertNotIn("Design and approach", protocol.render([findings[0]]))
+
+    def test_verifier_withholds_invalid_kind(self):
+        decision = {"candidate_ids": ["design:1"], "disposition": "publish",
+                    "reason": "Verified", "finding": {**self.finding, "kind": "other"}}
+        result, accepted = protocol.verification(
+            json.dumps({"coverage": self.coverage, "decisions": [decision]}),
+            [{"id": "design:1"}], self.snapshot)
+        self.assertEqual(accepted, [])
+        self.assertIn("Invalid finding kind", result["validation_errors"][0]["error"])
 
     def test_finding_must_refer_to_changed_file_on_correct_side(self):
         decision = {"candidate_ids": ["tests:1"], "disposition": "publish",

@@ -17,6 +17,18 @@ suggestion, verify the current cost or limitation, the proposed alternative,
 and why it preserves required behavior. Do not reject a supported suggestion
 merely because the current implementation is correct. Do not promote a design
 preference to a bug. Reject unsupported alternatives and generic questions.
+Use kind `design` for supported approach, architecture, or workflow concerns;
+use `defect` for correctness failures and `suggestion` for other improvements.
+Use suggestion severity for tradeoff questions without an established defect.
+A design concern can challenge the whole approach without claiming a bug.
+Check the claimed benefit against the mechanism's actual guarantees,
+adoption requirements, exceptions, and recurring costs. Retaining the existing
+behavior is a valid alternative when the evidence supports it.
+Publish a concrete design question when its factual premise and material
+tradeoff are established, but the choice depends on a requirement or measurement
+the author must supply. Explain what answer would change the recommendation.
+Uncertainty about that choice alone is not a reason to drop it or mark it
+unresolved; use unresolved when you cannot establish the factual premise.
 If a claim depends on a rapid-toggle, rapid-retry, or similar stress scenario,
 decide whether the reachable sequence has a meaningful consequence for public
 behavior or affected callers. An undocumented sequence can still expose a real
@@ -34,8 +46,9 @@ candidate ID exactly once, grouping IDs only when the claims share a root
 cause. Use `publish`, `drop`, or `unresolved` and ground each reason in code.
 For a published defect, verify its trigger and consequence. For a published
 suggestion, verify the present cost, concrete alternative, and why it preserves
-required behavior. A published finding must point to a changed file and a
-source line on the correct side of the diff (head for added or changed code,
+required behavior, or the material decision a grounded design question would
+settle. A published finding must point to a changed file and a source line on
+the correct side of the diff (head for added or changed code,
 base for removed code). Verify that the path and line match the claim. Evidence
 from unchanged policy or documentation belongs in the body; anchor the finding
 to the relevant changed code. Use unresolved when the checkout cannot settle a

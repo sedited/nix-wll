@@ -21,12 +21,13 @@ COVERAGE = object_schema({
 LOCATION = {"path": STRING, "line": {"type": "integer"},
             "side": {"type": "string", "enum": ["head", "base"]}}
 CANDIDATE = object_schema({
-    "kind": {"type": "string", "enum": ["defect", "suggestion"]},
+    "kind": {"type": "string", "enum": ["defect", "design", "suggestion"]},
     **LOCATION,
     **{key: STRING for key in ("title", "claim", "consequence", "evidence",
                                "correction", "uncertainty")},
 })
 FINDING = object_schema({
+    "kind": CANDIDATE["properties"]["kind"],
     "severity": {"type": "string", "enum": ["critical", "major", "minor", "suggestion"]},
     **LOCATION, "title": STRING, "body": STRING,
 })
@@ -98,7 +99,7 @@ def discovery(text, stage, snapshot):
     for index, finding in enumerate(result["findings"], 1):
         _object(finding, CANDIDATE["properties"])
         _location(finding, snapshot)
-        if finding["kind"] not in {"defect", "suggestion"}:
+        if finding["kind"] not in CANDIDATE["properties"]["kind"]["enum"]:
             raise InvalidReview("Invalid candidate kind")
         _text(finding, ("title", "claim", "consequence", "evidence", "correction", "uncertainty"),
               empty=("correction", "uncertainty"))
@@ -134,6 +135,8 @@ def verification(text, candidates, snapshot):
                 _location(finding, snapshot)
                 if finding["severity"] not in FINDING["properties"]["severity"]["enum"]:
                     raise InvalidReview("Invalid severity")
+                if finding["kind"] not in FINDING["properties"]["kind"]["enum"]:
+                    raise InvalidReview("Invalid finding kind")
                 _text(finding, ("title", "body"))
             except InvalidReview as exc:
                 error = str(exc)
@@ -175,9 +178,14 @@ def collation(text, accepted):
 
 def render(findings, limitations=()):
     sections = []
-    for severity, heading in (("critical", "🔴 Critical"), ("major", "🟠 Major"),
-                              ("minor", "🟡 Minor"), ("suggestion", "💡 Suggestion")):
-        group = [finding for finding in findings if finding["severity"] == severity]
+    groups = {}
+    for finding in findings:
+        section = "design" if finding["kind"] == "design" else finding["severity"]
+        groups.setdefault(section, []).append(finding)
+    for severity, heading in (("critical", "🔴 Critical"), ("design", "Design and approach"),
+                              ("major", "🟠 Major"), ("minor", "🟡 Minor"),
+                              ("suggestion", "💡 Suggestion")):
+        group = groups.get(severity, [])
         if group:
             sections.append(f"##### {heading}\n\n" + "\n\n".join(
                 f"**{finding['title']}** ({finding['path']}:{finding['line']}, "

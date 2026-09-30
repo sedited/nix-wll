@@ -26,6 +26,18 @@ specialist stages that do not fit the change. Design review covers architecture,
 project conventions and taste; the tests audit checks whether coverage
 justifies the amount of test code, fixtures and runtime.
 
+The design audit also weighs practical benefit against recurring contributor
+work, maintenance, confusion and reviewer attention, even when the code is
+correct. It compares the claimed outcome with what the mechanism guarantees.
+Grounded design questions can be published when their factual premise is
+verified and the answer would settle a material tradeoff.
+
+Accepted design concerns appear under "Design and approach", after critical
+bugs and before the remaining findings. Empty sections are omitted. The Luna
+writing pass edits wording but cannot remove accepted findings or change their
+classification. It retains its 6,000-token output limit; an incomplete or
+invalid edit falls back to the verifier's wording without truncating findings.
+
 Each discovery stage gets up to 6 tool inspections for routine reviews, 12 for
 standard reviews, or 24 for sensitive reviews. The verifier gets 24. At the
 inspection limit, further reads are refused and the model gets a final turn

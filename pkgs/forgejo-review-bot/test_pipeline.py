@@ -29,7 +29,7 @@ class PipelineTests(unittest.TestCase):
             Path("/unused"), "b"*40, "a"*40, "b"*40,
             {"src/example.cpp": "blob"}, {"src/example.cpp": "base"},
             frozenset({"src/example.cpp"}))
-        self.published = {"severity": "suggestion", "path": "src/example.cpp", "line": 3,
+        self.published = {"kind": "suggestion", "severity": "suggestion", "path": "src/example.cpp", "line": 3,
                           "side": "head", "title": "Simplify fixture",
                           "body": "Reuse the fixture while preserving the regression check."}
         self.debug = {}
@@ -181,19 +181,27 @@ class PipelineTests(unittest.TestCase):
 
     def test_invalid_editor_preserves_verified_wording(self):
         self.tier, self.audits = "routine", []
+        design = {**self.published, "kind": "design", "title": "Design concern",
+                  "body": "Prefer the existing approach for this interface."}
 
         def review(*args, **kwargs):
             return (json.dumps({"coverage": COMPLETE, "decisions": [
                 {"candidate_ids": ["independent:1"], "disposition": "publish",
-                 "reason": "Verified", "finding": self.published}]})
-                if kwargs["stage_name"] == "verifier" else discovery([candidate()]))
+                 "reason": "Verified", "finding": design}]})
+                if kwargs["stage_name"] == "verifier" else discovery([{
+                    **candidate(), "kind": "design"}]))
 
-        def edit(*args, **kwargs):
-            return '{"findings":[]}', {"status": "completed"}
+        for status in ("completed", "incomplete"):
+            with self.subTest(status=status):
+                self.debug = {}
 
-        content = self.run_review(review, edit)
-        self.assertIn(self.published["body"], content)
-        self.assertTrue(self.debug["stages"]["collator"]["used_verified_wording"])
+                def edit(*args, **kwargs):
+                    return '{"findings":[]}', {"status": status}
+
+                content = self.run_review(review, edit)
+                self.assertIn(design["body"], content)
+                self.assertIn("Design and approach", content)
+                self.assertTrue(self.debug["stages"]["collator"]["used_verified_wording"])
 
 
 if __name__ == "__main__":

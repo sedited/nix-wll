@@ -10,15 +10,19 @@ available evidence have been checked. At an inspection limit, retain supported
 findings and state the specific unanswered evidence. Mark coverage partial
 only when that evidence could materially change the review; avoid a generic
 limitation or automatic partial status when the available evidence is adequate.
-For each lead, give a changed-file path and source line that supports it. Set
-the flag when the code or unresolved evidence raises a credible consensus or
-security concern, and clear it otherwise.
+Use kind `design` for approach, architecture, or workflow tradeoffs and grounded
+questions, `defect` for correctness failures, and `suggestion` for other useful
+improvements. For each lead, give a changed-file path and source line that
+supports it. Set the flag when the code or unresolved evidence raises a
+credible consensus or security concern, and clear it otherwise.
 
 Record each distinct, substantiated lead, including independent minor issues.
 For a design or test-quality suggestion, name the current cost or limitation,
-the concrete alternative, and why the required behavior is preserved. First
-check that the behavior being protected is real: tie it to the PR rationale,
-public behavior, affected callers, or a regression the test would catch. Do not
+the concrete alternative, and why the required behavior is preserved. For a
+grounded design question, identify the material decision and what evidence or
+requirement would settle it. First check that the behavior being protected is
+real: tie it to the PR rationale, public behavior, affected callers, or a
+regression the test would catch. Do not
 promote an incidental stress case or mechanism to a requirement without that
 support. Do not summarize the patch, praise it, or fill a checklist with
 non-findings.
