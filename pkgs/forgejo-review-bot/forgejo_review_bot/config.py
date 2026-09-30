@@ -4,11 +4,16 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from .spend import supports_model
+
 
 DEFAULT_PROMPT_FILE = Path(__file__).resolve().parent.parent / "prompt.md"
 DEFAULT_AUDIT_DIR = Path(__file__).resolve().parent.parent / "audits"
-AUDIT_NAMES = ("state", "public_contract", "tests", "developer_notes", "design")
+AUDIT_NAMES = ("concurrency", "state", "public_contract", "tests", "design", "build")
+ADVERSARIAL_PROFILES = ("consensus", "wallet", "p2p")
 MODEL_NAMES = ("router", "independent", "adversarial", *AUDIT_NAMES, "verifier", "collator")
+PROMPT_NAMES = ("common", "router", "adversarial", *ADVERSARIAL_PROFILES,
+                *AUDIT_NAMES, "verifier", "collator")
 
 
 def load_prompt_file(path):
@@ -50,7 +55,7 @@ class BotConfig:
 
 def validate_models(models):
     if (set(models) != set(MODEL_NAMES)
-            or any(not isinstance(model, str) or not model.startswith("gpt-")
+            or any(not isinstance(model, str) or not supports_model(model)
                    for model in models.values())):
         raise ValueError("model config must name each review stage")
     return models
@@ -66,8 +71,7 @@ class PromptConfig:
     def load(cls, prompt_file=DEFAULT_PROMPT_FILE, audit_dir=DEFAULT_AUDIT_DIR,
              models_json=None):
         prompts = {name: load_prompt_file(audit_dir / f"{name}.md")
-                   for name in ("common", "router", "adversarial", *AUDIT_NAMES,
-                                "verifier", "collator")}
+                   for name in PROMPT_NAMES}
         if any(not prompt.strip() for prompt in prompts.values()):
             raise ValueError("audit prompt files must not be empty")
         path = models_json or audit_dir / "models.json"

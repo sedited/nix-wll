@@ -191,6 +191,51 @@ class EvaluateTests(unittest.TestCase):
         self.assertNotEqual(result["effective_config_sha256"], frozen["config_sha256"])
         self.assertIn(result["effective_config_sha256"][:12], path.name)
 
+    def test_old_frozen_prompt_shape_needs_complete_explicit_override(self):
+        manifest = self.capture()
+        frozen = json.loads(manifest.read_text(encoding="utf-8"))
+        old_prompts = frozen["config"]["prompts"]
+        old_prompts["models"].pop("build", None)
+        old_prompts["audit_prompts"].pop("build", None)
+        old_prompts["audit_prompts"].pop("consensus", None)
+        old_prompts["audit_prompts"].pop("wallet", None)
+        old_prompts["audit_prompts"].pop("p2p", None)
+        frozen["config_sha256"] = evaluate.digest(frozen["config"])
+        frozen["manifest_sha256"] = evaluate.digest({
+            key: value for key, value in frozen.items() if key != "manifest_sha256"})
+        old_manifest = self.root / "cases" / "old-shape.json"
+        evaluate.write_private_json(old_manifest, frozen)
+
+        with patch.object(pipeline, "review_with_independent_passes") as review:
+            failed = evaluate.run_case(old_manifest, "openai-key", self.root / "runs",
+                                       object())
+        review.assert_not_called()
+        result = json.loads(failed.read_text(encoding="utf-8"))
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("pass --audit-prompt-dir", result["error"]["message"])
+
+        audit_dir = self.root / "audits"
+        audit_dir.mkdir()
+        for name in config.PROMPT_NAMES:
+            (audit_dir / f"{name}.md").write_text(f"{name} prompt\n", encoding="utf-8")
+        models_json = self.root / "models.json"
+        models_json.write_text(json.dumps({
+            name: "gpt-6-luna" for name in config.MODEL_NAMES}), encoding="utf-8")
+
+        def review(api_key, review_input, snapshot, bot_config, prompt_config,
+                   current_pr, debug, **kwargs):
+            self.assertEqual(set(prompt_config.audit_prompts), set(config.PROMPT_NAMES))
+            self.assertEqual(set(prompt_config.models), set(config.MODEL_NAMES))
+            return "Review with complete override."
+
+        with patch.object(pipeline, "review_with_independent_passes", side_effect=review):
+            completed = evaluate.run_case(old_manifest, "openai-key", self.root / "runs",
+                                          object(), audit_dir=audit_dir,
+                                          models_json=models_json)
+        result = json.loads(completed.read_text(encoding="utf-8"))
+        self.assertEqual(result["status"], "completed")
+        self.assertIn("Review with complete override.", result["final_comment"])
+
     def test_routing_budget_and_code_each_identify_a_distinct_run(self):
         manifest = self.capture()
         ledger = spend.Ledger(self.root / "state" / "spend.sqlite3",

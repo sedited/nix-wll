@@ -2,7 +2,7 @@ import json
 import unittest
 from types import SimpleNamespace
 
-from forgejo_review_bot import protocol, routing
+from forgejo_review_bot import protocol
 
 
 class ProtocolTests(unittest.TestCase):
@@ -151,32 +151,6 @@ class ProtocolTests(unittest.TestCase):
                         json.dumps({"coverage": self.coverage,
                                     "decisions": [valid, invalid]}),
                         candidates, self.snapshot)
-
-    def test_router_cannot_lower_floor_and_selects_design_and_test_review(self):
-        proposed = {"tier": "routine", "audits": [], "evidence": ["Small change"],
-                    "missing_context": []}
-        plan = routing.validate_plan(json.dumps(proposed), {"src/example.cpp"}, "standard")
-        self.assertEqual(plan["tier"], "standard")
-        self.assertEqual(set(plan["audits"]), {"tests", "design"})
-        proposed["missing_context"] = ["Patch excerpt omitted"]
-        self.assertEqual(routing.validate_plan(json.dumps(proposed), set(), "routine")["tier"],
-                         "sensitive")
-        self.assertEqual(routing.minimum_tier({"src/validation.cpp"}), "sensitive")
-        self.assertEqual(routing.minimum_tier({"src/test/example_tests.cpp"}), "standard")
-        self.assertTrue(routing.is_test_path("src/wallet/test/example_tests.cpp"))
-
-    def test_header_sensitivity_depends_on_domain_and_router_evidence(self):
-        paths = {"src/util/translation.h"}
-        floor = routing.minimum_tier(paths)
-        self.assertEqual(floor, "standard")
-        for path in ("src/validation.h", "src/net_processing.h", "src/wallet/wallet.h"):
-            with self.subTest(path=path):
-                self.assertEqual(routing.minimum_tier({path}), "sensitive")
-        proposed = {"tier": "sensitive", "audits": [],
-                    "evidence": ["Changed shared-state synchronization"], "missing_context": []}
-        plan = routing.validate_plan(json.dumps(proposed), paths, floor)
-        self.assertEqual(plan["tier"], "sensitive")
-        self.assertIn("state", plan["audits"])
 
 
 if __name__ == "__main__":

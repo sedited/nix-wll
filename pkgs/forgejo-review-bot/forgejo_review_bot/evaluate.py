@@ -193,12 +193,18 @@ def prompt_override(frozen, prompt_file=None, audit_dir=None, models_json=None):
     prompts = dict(frozen.audit_prompts)
     if audit_dir:
         prompts = {name: config.load_prompt_file(audit_dir / f"{name}.md")
-                   for name in ("common", "router", "adversarial", *config.AUDIT_NAMES,
-                                "verifier", "collator")}
-        if any(not prompt.strip() for prompt in prompts.values()):
-            raise ValueError("audit prompt files must not be empty")
-    models = (config.validate_models(json.loads(models_json.read_text(encoding="utf-8")))
+                   for name in config.PROMPT_NAMES}
+    elif set(prompts) != set(config.PROMPT_NAMES):
+        raise ValueError("Frozen prompt names do not match current prompt profiles; "
+                         "pass --audit-prompt-dir with a complete replacement")
+    if any(not prompt.strip() for prompt in prompts.values()):
+        raise ValueError("audit prompt files must not be empty")
+    models = (json.loads(models_json.read_text(encoding="utf-8"))
               if models_json else dict(frozen.models))
+    if not models_json and set(models) != set(config.MODEL_NAMES):
+        raise ValueError("Frozen model names do not match current review stages; "
+                         "pass --models-json with a complete replacement")
+    models = config.validate_models(models)
     return config.PromptConfig(instructions, prompts, models)
 
 
@@ -226,7 +232,6 @@ def run_case(manifest_path, api_key, output_dir, ledger, routing_mode="enabled",
         if digest(frozen_config) != manifest["config_sha256"]:
             raise ValueError("Frozen configuration hash mismatch")
         bot_config = config.BotConfig(**frozen_config["bot"])
-        config.validate_models(frozen_config["prompts"]["models"])
         frozen_prompts = config.PromptConfig(**frozen_config["prompts"])
         prompt_config = prompt_override(frozen_prompts, prompt_file, audit_dir, models_json)
         code_hash = source_code_sha256()

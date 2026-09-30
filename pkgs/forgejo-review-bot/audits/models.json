@@ -1,8 +1,9 @@
 {
   "adversarial": "gpt-6.1-sol",
+  "build": "gpt-6-luna",
   "collator": "gpt-6-luna",
+  "concurrency": "gpt-6-luna",
   "design": "gpt-6-luna",
-  "developer_notes": "gpt-6-luna",
   "independent": "gpt-6-luna",
   "public_contract": "gpt-6-luna",
   "router": "gpt-6-luna",

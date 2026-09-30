@@ -36,7 +36,8 @@ class PipelineTests(unittest.TestCase):
         self.calls = []
 
     def plan(self, *args, **kwargs):
-        result = {"tier": self.tier, "audits": self.audits, "evidence": [], "missing_context": []}
+        result = {"tier": self.tier, "audits": self.audits,
+                  "profiles": getattr(self, "profiles", []), "evidence": [], "missing_context": []}
         args[4]["routing"] = {"selected": result}
         return result
 
@@ -48,13 +49,14 @@ class PipelineTests(unittest.TestCase):
             {"id": item["id"], "title": item["title"], "body": item["body"]} for item in findings
         ]}), {"status": "completed"}
 
-    def run_review(self, reviewer, editor=None):
+    def run_review(self, reviewer, editor=None, budget=None):
         with patch.object(pipeline.routing, "plan_review", side_effect=self.plan), \
                 patch.object(model, "openai_review", side_effect=reviewer), \
                 patch.object(model, "run_audit", side_effect=editor or self.edit), \
                 patch.object(pipeline, "audit_developer_notes", return_value="Policy"):
             return pipeline.review_with_independent_passes(
-                "key", "PR diff", self.snapshot, self.config, self.prompts, 42, self.debug)
+                "key", "PR diff", self.snapshot, self.config, self.prompts, 42, self.debug,
+                budget=budget)
 
     def test_routine_review_keeps_luna_editor_and_sends_only_accepted_findings(self):
         self.tier, self.audits = "standard", ["tests", "design"]
@@ -79,18 +81,20 @@ class PipelineTests(unittest.TestCase):
         content = self.run_review(review)
         self.assertIn("Reuse the fixture", content)
         self.assertTrue(all(value == "gpt-6-luna" for _, value in self.calls))
-        self.assertEqual([name for name, _ in self.calls], ["independent", "design", "tests", "verifier"])
+        self.assertEqual([name for name, _ in self.calls], ["independent", "tests", "design", "verifier"])
         self.assertIn("Rejected claim", self.debug["stage_outputs"]["tests"])
         self.assertEqual(self.debug["coverage"]["status"], "complete")
 
     def test_sensitive_discovery_uses_sol_and_failed_audit_keeps_partial_usage(self):
         self.tier, self.audits = "sensitive", ["design"]
         efforts = {}
+        output_limits = {}
 
         def review(*args, **kwargs):
             stage = kwargs["stage_name"]
             self.calls.append((stage, kwargs["model"]))
             efforts[stage] = kwargs["reasoning_effort"]
+            output_limits[stage] = kwargs["max_output_tokens"]
             if stage == "design":
                 args[5]["turns"].append({"input_tokens": 100, "output_tokens": 10})
                 raise TimeoutError()
@@ -101,6 +105,9 @@ class PipelineTests(unittest.TestCase):
         content = self.run_review(review)
         self.assertIn(("adversarial", "gpt-6.1-sol"), self.calls)
         self.assertEqual(efforts["adversarial"], "high")
+        self.assertEqual(output_limits["adversarial"], 25_000)
+        self.assertEqual(efforts["verifier"], "high")
+        self.assertEqual(output_limits["verifier"], 25_000)
         self.assertIn(("verifier", "gpt-6-luna"), self.calls)
         self.assertIn("incomplete", content)
         self.assertEqual(self.debug["stages"]["design"]["turns"][0]["input_tokens"], 100)
@@ -134,7 +141,7 @@ class PipelineTests(unittest.TestCase):
 
                 self.run_review(review)
                 self.assertEqual(limits["independent"], expected_limit)
-                self.assertEqual(limits["design"], expected_limit)
+                self.assertEqual(limits["design"], 48 if tier == "standard" else expected_limit)
                 self.assertEqual(limits["tests"], expected_limit)
                 self.assertEqual(limits["verifier"], 48)
                 if tier == "routine":
@@ -143,6 +150,65 @@ class PipelineTests(unittest.TestCase):
                     self.assertEqual(limits["adversarial"], 48)
                 if tier == "standard":
                     self.assertEqual(limits["state"], 48)
+
+    def test_domain_checks_precede_design_and_profiles_share_adversarial_call(self):
+        self.tier = "sensitive"
+        self.audits = ["design", "tests", "concurrency", "state"]
+        self.profiles = ["consensus", "wallet"]
+        prompts = {}
+        inputs = {}
+
+        def review(*args, **kwargs):
+            stage = kwargs["stage_name"]
+            self.calls.append(stage)
+            prompts[stage] = kwargs["prompt"]
+            inputs[stage] = args[1]
+            if stage == "verifier":
+                return json.dumps({"coverage": COMPLETE, "decisions": [
+                    {"candidate_ids": ["adversarial:1"], "disposition": "drop",
+                     "reason": "Existing guard prevents the trigger", "finding": None}]})
+            return discovery([candidate()] if stage == "adversarial" else [])
+
+        self.run_review(review)
+        self.assertEqual(self.calls, ["independent", "adversarial", "concurrency", "state",
+                                     "tests", "design", "verifier"])
+        for profile in self.profiles:
+            self.assertIn(self.prompts.audit_prompts[profile], prompts["adversarial"])
+        self.assertNotIn(self.prompts.audit_prompts["p2p"], prompts["adversarial"])
+        self.assertIn("Merge-base developer notes:\nPolicy", inputs["design"])
+        self.assertNotIn("Duplicate setup", inputs["state"])
+        self.assertIn("Duplicate setup", inputs["verifier"])
+
+    def test_verifier_protection_tracks_candidates_and_sensitive_escalation(self):
+        self.tier, self.audits = "standard", ["tests"]
+
+        class Budget:
+            def __init__(self):
+                self.payloads = []
+
+            def protect_verifier(self, payload):
+                self.payloads.append(payload)
+
+            def summary(self):
+                return {}
+
+        budget = Budget()
+
+        def review(*args, **kwargs):
+            stage = kwargs["stage_name"]
+            if stage == "independent":
+                return discovery([candidate()], sensitive=True)
+            if stage == "verifier":
+                return json.dumps({"coverage": COMPLETE, "decisions": [
+                    {"candidate_ids": ["independent:1"], "disposition": "drop",
+                     "reason": "Existing guard", "finding": None}]})
+            return discovery()
+
+        self.run_review(review, budget=budget)
+        self.assertEqual(budget.payloads[0]["max_output_tokens"], 25_000)
+        self.assertEqual(budget.payloads[1]["max_output_tokens"], 8_000)
+        self.assertEqual(budget.payloads[2]["reasoning"]["effort"], "high")
+        self.assertIn("independent:1", budget.payloads[2]["input"][0]["content"])
 
     def test_missing_verifier_decision_never_publishes_candidate(self):
         self.tier, self.audits = "routine", []

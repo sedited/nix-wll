@@ -44,8 +44,7 @@ class BotTests(unittest.TestCase):
     def test_model_config_requires_adversarial_stage_and_prompt(self):
         with tempfile.TemporaryDirectory() as directory:
             audit_dir = Path(directory)
-            for name in ("common", "router", "adversarial", *config.AUDIT_NAMES,
-                         "verifier", "collator"):
+            for name in config.PROMPT_NAMES:
                 (audit_dir / f"{name}.md").write_text(f"{name} instructions\n")
             models = {name: "gpt-6.1-sol" if name in
                       ("independent", "adversarial") else "gpt-6-luna"
