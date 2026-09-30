@@ -62,7 +62,9 @@ class PipelineTests(unittest.TestCase):
         def review(*args, **kwargs):
             stage = kwargs["stage_name"]
             self.calls.append((stage, kwargs["model"]))
+            self.assertEqual(kwargs["reasoning_effort"], "xhigh" if stage == "design" else "low")
             if stage == "design":
+                self.assertEqual(kwargs["max_output_tokens"], 25_000)
                 return discovery([candidate()])
             if stage == "tests":
                 return discovery([candidate("Rejected claim")])

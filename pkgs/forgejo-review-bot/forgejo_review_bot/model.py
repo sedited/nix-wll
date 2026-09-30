@@ -258,7 +258,9 @@ def openai_review(api_key, review, snapshot, bot_config, prompt_config, debug=No
         debug.update({"instructions": prompt,
                       "review_input_bytes": len(review_bytes),
                       "review_input_sha256": hashlib.sha256(review_bytes).hexdigest(),
-                      "turns": [], "tools": [], "max_tool_calls": max_tool_calls})
+                      "turns": [], "tools": [], "max_tool_calls": max_tool_calls,
+                      "reasoning_effort": reasoning_effort,
+                      "max_output_tokens": max_output_tokens})
         stage_debug = _stage_record(debug, stage_name, model)
     else:
         stage_debug = None

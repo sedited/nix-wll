@@ -37,13 +37,15 @@ def review_with_independent_passes(api_key, review, snapshot, bot_config,
             if tools:
                 calls = (24 if name in {"adversarial", "verifier"}
                          else DISCOVERY_TOOL_LIMITS[plan["tier"]])
+                output_tokens = {"design": 25_000, "verifier": 8_000}.get(name, 4_000)
                 answer = model.openai_review(
                     api_key, input_text, snapshot, bot_config, prompt_config,
                     record, current_pr=current_pr, prompt=prompt,
                     model=prompt_config.models[name],
                     tools=model.TOOLS if name in FULL_CONTEXT_STAGES else model.FOCUSED_TOOLS,
                     max_tool_calls=calls,
-                    max_output_tokens=8_000 if name == "verifier" else 4_000,
+                    max_output_tokens=output_tokens,
+                    reasoning_effort="xhigh" if name == "design" else "low",
                     first_tool_required=name in FULL_CONTEXT_STAGES,
                     stage_name=name, on_response=on_response, budget=budget,
                     response_schema=schema, allow_discussions=allow_discussions,

@@ -139,13 +139,18 @@ class ModelBudgetTests(unittest.TestCase):
                 patch.object(model, "read_file", return_value="1: evidence") as read:
             answer = model.openai_review(
                 "secret", "patch", self.snapshot, SimpleNamespace(), self.prompt_config,
-                debug, max_tool_calls=2, budget=budget)
+                debug, max_tool_calls=2, budget=budget,
+                reasoning_effort="xhigh", max_output_tokens=25_000)
         self.assertEqual(answer, raw)
         self.assertEqual(read.call_count, 2)
         final_request = json.loads(send.call_args_list[-1].args[0].data)
         self.assertEqual(final_request["tool_choice"], "none")
+        self.assertEqual(final_request["reasoning"], {"effort": "xhigh"})
+        self.assertEqual(final_request["max_output_tokens"], 25_000)
         self.assertIn("Inspection limit reached", final_request["input"][-1]["output"])
         self.assertEqual(debug["max_tool_calls"], 2)
+        self.assertEqual(debug["reasoning_effort"], "xhigh")
+        self.assertEqual(debug["max_output_tokens"], 25_000)
         self.assertEqual(debug["tools"][-1]["skipped"], "inspection_limit")
         self.assertNotIn("skipped", debug["tools"][0])
         self.assertEqual([event[0] for event in budget.events],
