@@ -19,7 +19,7 @@ SENSITIVE = re.compile(
     r"(?:validation|net_processing|net|netbase|txmempool|coins|dbwrapper|"
     r"serialize|streams|key|pubkey|sync|scheduler|checkqueue|addrman|"
     r"blockstorage|chainstate|kernel|policy)(?:[./_]|$))"
-    r"|^src/.*\.h$|^depends/|^cmake/|(^|/)CMakeLists\.txt$"
+    r"|^depends/|^cmake/|(^|/)CMakeLists\.txt$"
     r"|^configure\.ac$|(^|/)(?:Cargo\.lock|flake\.lock)$"
 )
 

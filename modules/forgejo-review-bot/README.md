@@ -30,6 +30,9 @@ Tool output is capped.
 
 A Luna router selects relevant specialists, with code rules requiring deeper
 review for sensitive paths and incomplete input. Routine changes use Luna.
+Header changes follow their domain's sensitivity rules; the `.h` extension
+alone does not force a full review. The router and reviewers can escalate
+based on changed behavior and inspect relevant headers with their tools.
 Sensitive changes also receive an independent Sol discovery review. The
 verifier and writing pass stay on Luna. Lightweight routing skips Sol and
 specialist stages that do not fit the change. Design review covers architecture,

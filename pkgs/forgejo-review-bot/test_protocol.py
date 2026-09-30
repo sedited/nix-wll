@@ -165,6 +165,19 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(routing.minimum_tier({"src/test/example_tests.cpp"}), "standard")
         self.assertTrue(routing.is_test_path("src/wallet/test/example_tests.cpp"))
 
+    def test_header_sensitivity_depends_on_domain_and_router_evidence(self):
+        paths = {"src/util/translation.h"}
+        floor = routing.minimum_tier(paths)
+        self.assertEqual(floor, "standard")
+        for path in ("src/validation.h", "src/net_processing.h", "src/wallet/wallet.h"):
+            with self.subTest(path=path):
+                self.assertEqual(routing.minimum_tier({path}), "sensitive")
+        proposed = {"tier": "sensitive", "audits": [],
+                    "evidence": ["Changed shared-state synchronization"], "missing_context": []}
+        plan = routing.validate_plan(json.dumps(proposed), paths, floor)
+        self.assertEqual(plan["tier"], "sensitive")
+        self.assertIn("state", plan["audits"])
+
 
 if __name__ == "__main__":
     unittest.main()
