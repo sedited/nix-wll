@@ -211,7 +211,8 @@ def prompt_override(frozen, prompt_file=None, audit_dir=None, models_json=None):
 
 
 def run_case(manifest_path, api_key, output_dir, ledger, routing_mode="enabled",
-             prompt_file=None, audit_dir=None, models_json=None, labels=None):
+             prompt_file=None, audit_dir=None, models_json=None, labels=None,
+             ppq_api_key=None, ppq_ledger=None):
     """Replay a captured case without Forgejo or remote Git reads."""
     output_dir = private_dir(output_dir)
     debug = {}
@@ -239,9 +240,11 @@ def run_case(manifest_path, api_key, output_dir, ledger, routing_mode="enabled",
         code_hash = source_code_sha256()
         review_limit = getattr(ledger, "review_limit_micros", None)
         monthly_limit = getattr(ledger, "monthly_limit_micros", None)
+        ppq_limit = getattr(ppq_ledger, "review_limit_micros", None)
         effective_config = {
             "bot": asdict(bot_config), "prompts": asdict(prompt_config),
             "routing_mode": routing_mode,
+            "ppq_review_budget_usd": None if ppq_limit is None else ppq_limit / 1_000_000,
             "review_budget_usd": None if review_limit is None else review_limit / 1_000_000,
             "monthly_budget_usd": None if monthly_limit is None else monthly_limit / 1_000_000,
             "source_code_sha256": code_hash,
@@ -264,11 +267,14 @@ def run_case(manifest_path, api_key, output_dir, ledger, routing_mode="enabled",
                 raise ValueError("Frozen merge base mismatch")
             review_id = f"eval:{case_id}:{uuid.uuid4().hex}"
             budget = spend.RequestBudget(ledger, review_id)
+            ppq_budget = (spend.RequestBudget(ppq_ledger, review_id)
+                          if ppq_ledger is not None else None)
             artifact["review_id"] = review_id
             content = pipeline.review_with_independent_passes(
                 api_key, review, snapshot, bot_config, prompt_config,
                 manifest["pr"], debug, budget=budget,
-                routing_mode=routing_mode, allow_discussions=False)
+                routing_mode=routing_mode, allow_discussions=False,
+                ppq_api_key=ppq_api_key, ppq_budget=ppq_budget)
         artifact.update({
             "status": "completed", "case_id": case_id, "pr": manifest["pr"],
             "base_sha": base_sha, "head_sha": head_sha,
@@ -559,12 +565,14 @@ def main(argv=None):
     run.add_argument("--state-dir", type=Path, required=True)
     run.add_argument("--output-dir", type=Path, required=True)
     run.add_argument("--openai-key-file", type=Path, required=True)
+    run.add_argument("--ppq-key-file", type=Path, required=True)
     run.add_argument("--prompt-file", type=Path)
     run.add_argument("--audit-prompt-dir", type=Path)
     run.add_argument("--models-json", type=Path)
     run.add_argument("--routing-mode", choices=("enabled", "shadow", "full"),
                      default="enabled")
     run.add_argument("--review-budget-usd", type=float, default=1.00)
+    run.add_argument("--ppq-review-budget-usd", type=float, default=0.50)
     run.add_argument("--monthly-budget-usd", type=float)
     run.add_argument("--labels-json", type=Path,
                      help="Optional local labels keyed by case ID; never sent to models")
@@ -600,16 +608,20 @@ def main(argv=None):
         return 0
 
     api_key = read_secret(args.openai_key_file, "OpenAI key")
+    ppq_api_key = read_secret(args.ppq_key_file, "PPQ key")
     ledger = spend.Ledger(args.state_dir / "spend.sqlite3",
                           review_limit_usd=args.review_budget_usd,
                           monthly_limit_usd=args.monthly_budget_usd)
+    ppq_ledger = spend.Ledger(args.state_dir / "ppq-spend.sqlite3",
+                             review_limit_usd=args.ppq_review_budget_usd)
     labels = (json.loads(args.labels_json.read_text(encoding="utf-8"))
               if args.labels_json else {})
     result = 0
     for manifest in args.manifests:
         path = run_case(manifest, api_key, args.output_dir, ledger,
                         args.routing_mode, args.prompt_file, args.audit_prompt_dir,
-                        args.models_json, labels)
+                        args.models_json, labels, ppq_api_key=ppq_api_key,
+                        ppq_ledger=ppq_ledger)
         print(path)
         if json.loads(path.read_text(encoding="utf-8"))["status"] != "completed":
             result = 1

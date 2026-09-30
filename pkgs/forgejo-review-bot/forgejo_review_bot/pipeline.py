@@ -1,24 +1,27 @@
 """Run selected independent reviews, verify their evidence, then edit findings."""
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 
 from . import model, protocol, routing
 from .config import AUDIT_NAMES, ADVERSARIAL_PROFILES
 from .repository import audit_developer_notes, focused_review_input
 from .spend import BudgetExceeded
 
-# A sequential pipeline spends the review budget in a predictable order.
+# Domain stages spend the review budget in a predictable order; the two
+# adversarial models review the same evidence concurrently.
 # Domain correctness precedes design; verification retains protected headroom.
 DISCOVERY_ORDER = ("adversarial", "concurrency", "state", "public_contract",
                    "build", "tests", "design")
-FULL_CONTEXT_STAGES = {"independent", "adversarial", "verifier"}
+ADVERSARIAL_STAGES = ("adversarial", "adversarial_glm")
+FULL_CONTEXT_STAGES = {"independent", *ADVERSARIAL_STAGES, "verifier"}
 DISCOVERY_TOOL_LIMITS = {"routine": 12, "standard": 24, "sensitive": 48}
 
 
 def stage_settings(name, tier):
     if name == "design":
         return "xhigh", 25_000
-    if name == "adversarial" or name == "verifier" and tier == "sensitive":
+    if name in ADVERSARIAL_STAGES or name == "verifier" and tier == "sensitive":
         return "high", 25_000
     if name == "concurrency":
         return "medium", 8_000
@@ -28,7 +31,8 @@ def stage_settings(name, tier):
 def review_with_independent_passes(api_key, review, snapshot, bot_config,
                                   prompt_config, current_pr, debug,
                                   on_response=None, budget=None, is_current=None,
-                                  routing_mode="enabled", allow_discussions=True):
+                                  routing_mode="enabled", allow_discussions=True,
+                                  ppq_api_key=None, ppq_budget=None):
     stages = debug.setdefault("stages", {})
     outputs = debug.setdefault("stage_outputs", {})
     limitations = []
@@ -60,19 +64,21 @@ def review_with_independent_passes(api_key, review, snapshot, bot_config,
     notes = None
 
     def run_stage(name, input_text, prompt, schema, *, tools=True):
-        debug["pipeline_stage"] = name
+        if name not in ADVERSARIAL_STAGES:
+            debug["pipeline_stage"] = name
         record = {"model": prompt_config.models[name], "status": "running",
                   "turns": [], "tools": []}
         stages[name] = record
-        if name == "adversarial":
+        if name in ADVERSARIAL_STAGES:
             record["profiles"] = list(plan["profiles"])
         try:
             if tools:
-                calls = (48 if name in {"adversarial", "verifier"}
+                calls = (48 if name in {*ADVERSARIAL_STAGES, "verifier"}
                          else DISCOVERY_TOOL_LIMITS[plan["tier"]])
                 effort, output_tokens = stage_settings(name, plan["tier"])
                 answer = model.openai_review(
-                    api_key, input_text, snapshot, bot_config, prompt_config,
+                    ppq_api_key if name == "adversarial_glm" else api_key,
+                    input_text, snapshot, bot_config, prompt_config,
                     record, current_pr=current_pr, prompt=prompt,
                     model=prompt_config.models[name],
                     tools=model.TOOLS if name in FULL_CONTEXT_STAGES else model.FOCUSED_TOOLS,
@@ -80,9 +86,12 @@ def review_with_independent_passes(api_key, review, snapshot, bot_config,
                     max_output_tokens=output_tokens,
                     reasoning_effort=effort,
                     first_tool_required=name in FULL_CONTEXT_STAGES,
-                    stage_name=name, on_response=on_response, budget=budget,
+                    stage_name=name, on_response=on_response,
+                    budget=ppq_budget if name == "adversarial_glm" else budget,
                     response_schema=schema, allow_discussions=allow_discussions,
-                    is_current=is_current)
+                    is_current=is_current,
+                    **({"api_base": "https://api.ppq.ai/v1"}
+                       if name == "adversarial_glm" else {}))
             else:
                 answer, response = model.run_audit(
                     api_key, name, prompt, input_text, prompt_config,
@@ -107,8 +116,9 @@ def review_with_independent_passes(api_key, review, snapshot, bot_config,
     def discover(name):
         nonlocal notes
         prompt = (prompt_config.instructions if name == "independent"
-                  else prompt_config.audit_prompts[name])
-        if name == "adversarial":
+                  else prompt_config.audit_prompts[
+                      "adversarial" if name == "adversarial_glm" else name])
+        if name in ADVERSARIAL_STAGES:
             prompt += "\n\n" + "\n\n".join(
                 prompt_config.audit_prompts[profile] for profile in plan["profiles"])
         prompt = prompt_config.audit_prompts["common"] + "\n\n" + prompt
@@ -118,15 +128,10 @@ def review_with_independent_passes(api_key, review, snapshot, bot_config,
                 notes = audit_developer_notes(snapshot)
             input_text += "\n\nMerge-base developer notes:\n" + notes
         try:
-            protect_verification()
             answer = run_stage(name, input_text, prompt, protocol.DISCOVERY_SCHEMA)
             result = protocol.discovery(answer, name, snapshot)
             stages[name]["coverage"] = result["coverage"]
-            candidates.extend(result["findings"])
-            candidate_sources.update({finding["id"]: name for finding in result["findings"]})
-            if result["coverage"]["status"] == "partial":
-                limitations.append(f"The {name} review had incomplete evidence.")
-            return result["requires_sensitive_review"]
+            return result
         except model.StaleReview:
             raise
         except Exception as exc:
@@ -135,10 +140,20 @@ def review_with_independent_passes(api_key, review, snapshot, bot_config,
                 record.update(status="invalid", error_type=type(exc).__name__)
             if isinstance(exc, protocol.InvalidReview):
                 record["validation_error"] = str(exc)
+            return None
+
+    def collect(name, result):
+        if result is None:
             limitations.append(f"The {name} review did not complete.")
             return False
+        candidates.extend(result["findings"])
+        candidate_sources.update({finding["id"]: name for finding in result["findings"]})
+        if result["coverage"]["status"] == "partial":
+            limitations.append(f"The {name} review had incomplete evidence.")
+        return result["requires_sensitive_review"]
 
-    sensitive = discover("independent")
+    protect_verification()
+    sensitive = collect("independent", discover("independent"))
     selected = set(plan["audits"])
     if sensitive and plan["tier"] != "sensitive":
         selected.update(AUDIT_NAMES)
@@ -151,8 +166,19 @@ def review_with_independent_passes(api_key, review, snapshot, bot_config,
     completed = set()
     while pending := [name for name in DISCOVERY_ORDER if name in selected - completed]:
         name = pending[0]
-        escalate = discover(name)
-        completed.add(name)
+        protect_verification()
+        if name == "adversarial" and ppq_api_key:
+            debug["pipeline_stage"] = "adversarial"
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                futures = {stage: executor.submit(discover, stage)
+                           for stage in ADVERSARIAL_STAGES}
+                results = {stage: future.result() for stage, future in futures.items()}
+            escalate = any([collect(stage, results[stage])
+                            for stage in ADVERSARIAL_STAGES])
+            completed.update(ADVERSARIAL_STAGES)
+        else:
+            escalate = collect(name, discover(name))
+            completed.add(name)
         if escalate and plan["tier"] != "sensitive":
             selected.update(("adversarial", "state", "concurrency"))
             plan = {**plan, "tier": "sensitive",
@@ -161,10 +187,12 @@ def review_with_independent_passes(api_key, review, snapshot, bot_config,
                     "evidence": plan["evidence"] + [f"{name} requested sensitive review"]}
             debug["routing"]["selected"] = plan
             debug["routing"]["escalated_by"] = name
-    for name in DISCOVERY_ORDER:
+    for name in (*DISCOVERY_ORDER, "adversarial_glm"):
         if name not in completed:
             stages[name] = {"model": prompt_config.models[name], "status": "skipped",
                             "turns": [], "tools": []}
+            if name == "adversarial_glm" and not ppq_api_key:
+                stages[name]["reason"] = "PPQ API key is not configured"
 
     if is_current is not None and not is_current():
         raise model.StaleReview()
@@ -231,10 +259,17 @@ def review_with_independent_passes(api_key, review, snapshot, bot_config,
          "candidate_ids": finding_candidates[finding["id"]],
          "raised_by": sorted({candidate_sources[identifier]
                               for identifier in finding_candidates[finding["id"]]}) or ["verifier"],
-         "verified_by": "verifier", "edited_by": "collator" if was_edited else None}
+         "raised_by_models": sorted({prompt_config.models[candidate_sources[identifier]]
+                                     for identifier in finding_candidates[finding["id"]]})
+                             or [prompt_config.models["verifier"]],
+         "verified_by": "verifier", "verified_by_model": prompt_config.models["verifier"],
+         "edited_by": "collator" if was_edited else None,
+         "edited_by_model": prompt_config.models["collator"] if was_edited else None}
         for finding in findings
     ]
     if budget is not None:
         debug["budget"] = budget.summary()
+    if ppq_budget is not None:
+        debug["ppq_budget"] = ppq_budget.summary()
     debug.pop("pipeline_stage", None)
     return protocol.render(findings, limitations)

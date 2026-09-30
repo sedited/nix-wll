@@ -98,7 +98,7 @@ def retryable_error(exc):
 
 def process_job(job, jobs, state_dir, api_key, forgejo_token, bot_login,
                 bot_config, prompt_config, ledger, routing_mode="enabled",
-                allow_discussions=True):
+                allow_discussions=True, ppq_api_key=None, ppq_ledger=None):
     number = job["number"]
     base_ref = job["base_ref"]
     expected_head = job["head"]
@@ -114,6 +114,9 @@ def process_job(job, jobs, state_dir, api_key, forgejo_token, bot_login,
     failure = None
     budget = spend.RequestBudget(
         ledger, review_id=f'pr:{number}:{job["id"]}:{job["generation"]}')
+
+    ppq_budget = (spend.RequestBudget(ppq_ledger, budget.review_id)
+                  if ppq_ledger is not None else None)
 
     def is_current():
         return (jobs.is_current(job)
@@ -155,7 +158,8 @@ def process_job(job, jobs, state_dir, api_key, forgejo_token, bot_login,
                                api_key, review, snapshot, bot_config, prompt_config,
                                number, debug, budget=budget, is_current=is_current,
                                routing_mode=routing_mode,
-                               allow_discussions=allow_discussions))
+                               allow_discussions=allow_discussions, ppq_api_key=ppq_api_key,
+                               ppq_budget=ppq_budget))
                 debug["budget"] = budget.summary()
                 saved = {"base_sha": base_sha, "head_sha": head_sha,
                          "content": content, "debug": debug}
@@ -241,7 +245,7 @@ def process_job(job, jobs, state_dir, api_key, forgejo_token, bot_login,
 
 def worker(jobs, state_dir, api_key, forgejo_token, bot_login, bot_config,
            prompt_config, ledger, routing_mode="enabled", allow_discussions=True,
-           stop_event=None):
+           stop_event=None, ppq_api_key=None, ppq_ledger=None):
     stop_event = stop_event or threading.Event()
     while not stop_event.is_set():
         try:
@@ -256,7 +260,9 @@ def worker(jobs, state_dir, api_key, forgejo_token, bot_login, bot_config,
         try:
             process_job(job, jobs, state_dir, api_key, forgejo_token, bot_login,
                         bot_config, prompt_config, ledger, routing_mode,
-                        allow_discussions)
+                        allow_discussions,
+                        **({"ppq_api_key": ppq_api_key, "ppq_ledger": ppq_ledger}
+                           if ppq_api_key is not None else {}))
         except Exception as exc:
             logging.exception("Review worker failed unexpectedly for PR %d", job["number"])
             try:
@@ -335,6 +341,7 @@ def main():
     parser.add_argument("--comment-marker",
                         help="Hidden marker used to find the bot's editable comment")
     parser.add_argument("--openai-key-file", type=Path, required=True)
+    parser.add_argument("--ppq-key-file", type=Path, required=True)
     parser.add_argument("--webhook-secret-file", type=Path, required=True)
     parser.add_argument("--forgejo-token-file", type=Path, required=True)
     parser.add_argument("--bot-login", required=True)
@@ -345,6 +352,7 @@ def main():
     parser.add_argument("--models-json", type=Path,
                         help="JSON model routing for each review stage")
     parser.add_argument("--review-budget-usd", type=float, default=1.00)
+    parser.add_argument("--ppq-review-budget-usd", type=float, default=0.50)
     parser.add_argument("--monthly-budget-usd", type=float)
     parser.add_argument("--routing-mode", choices=("enabled", "shadow", "full"),
                         default="enabled")
@@ -357,9 +365,10 @@ def main():
     prompt_config = config.PromptConfig.load(args.prompt_file, args.audit_prompt_dir,
                                              args.models_json)
     api_key = args.openai_key_file.read_text().strip()
+    ppq_api_key = args.ppq_key_file.read_text().strip()
     secret = args.webhook_secret_file.read_bytes().strip()
     forgejo_token = args.forgejo_token_file.read_text().strip()
-    if not api_key or not secret or not forgejo_token or not args.bot_login:
+    if not api_key or not ppq_api_key or not secret or not forgejo_token or not args.bot_login:
         parser.error("secret files must not be empty")
     args.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     args.state_dir.chmod(0o700)
@@ -368,11 +377,15 @@ def main():
     ledger = spend.Ledger(args.state_dir / "spend.sqlite3",
                           review_limit_usd=args.review_budget_usd,
                           monthly_limit_usd=args.monthly_budget_usd)
+    ppq_ledger = spend.Ledger(args.state_dir / "ppq-spend.sqlite3",
+                             review_limit_usd=args.ppq_review_budget_usd)
     logging.info("review queue recovered_claims=%d workers=%d", recovered, args.workers)
     for index in range(args.workers):
         threading.Thread(target=worker, name=f"review-{index + 1}",
                          args=(jobs, args.state_dir, api_key, forgejo_token,
                                args.bot_login, bot_config, prompt_config, ledger,
-                               args.routing_mode), daemon=True).start()
+                               args.routing_mode),
+                         kwargs={"ppq_api_key": ppq_api_key, "ppq_ledger": ppq_ledger},
+                         daemon=True).start()
     server = ThreadingHTTPServer((args.listen, args.port), make_handler(secret, jobs, bot_config))
     server.serve_forever()

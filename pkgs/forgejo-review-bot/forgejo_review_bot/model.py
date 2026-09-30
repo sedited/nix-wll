@@ -96,13 +96,13 @@ class StaleReview(Exception):
 
 
 def request_response(api_key, data, stage_name, on_response=None, budget=None,
-                     is_current=None):
+                     is_current=None, api_base="https://api.openai.com/v1"):
     if is_current is not None and not is_current():
         raise StaleReview("review head changed before model request")
     payload = json.dumps(data).encode()
     token = budget.reserve(stage_name, data) if budget is not None else None
     request = urllib.request.Request(
-        "https://api.openai.com/v1/responses", data=payload,
+        f"{api_base.rstrip('/')}/responses", data=payload,
         headers={"Authorization": f"Bearer {api_key}",
                  "Content-Type": "application/json"}, method="POST",
     )
@@ -245,7 +245,7 @@ def openai_review(api_key, review, snapshot, bot_config, prompt_config, debug=No
                   max_output_tokens=MAX_OUTPUT_TOKENS, stage_name="independent",
                   on_response=None, budget=None, response_schema=None,
                   reasoning_effort="low", allow_discussions=True,
-                  is_current=None):
+                  is_current=None, api_base="https://api.openai.com/v1"):
     prompt = prompt_config.instructions if prompt is None else prompt
     model = prompt_config.models["independent"] if model is None else model
     tools = TOOLS if tools is None else tools
@@ -267,6 +267,8 @@ def openai_review(api_key, review, snapshot, bot_config, prompt_config, debug=No
         stage_debug = _stage_record(debug, stage_name, model)
     else:
         stage_debug = None
+    request_options = ({"api_base": api_base}
+                       if api_base != "https://api.openai.com/v1" else {})
     calls_used = 0
     context_calls = 0
     history_calls = 0
@@ -289,7 +291,8 @@ def openai_review(api_key, review, snapshot, bot_config, prompt_config, debug=No
         budget_forced_final = False
         try:
             result, payload, elapsed = request_response(
-                api_key, data, stage_name, on_response, budget, is_current)
+                api_key, data, stage_name, on_response, budget, is_current,
+                **request_options)
         except StaleReview:
             if stage_debug is not None:
                 stage_debug.update(status="stale", error="StaleReview")
@@ -307,7 +310,8 @@ def openai_review(api_key, review, snapshot, bot_config, prompt_config, debug=No
             budget_forced_final = True
             try:
                 result, payload, elapsed = request_response(
-                    api_key, data, stage_name, on_response, budget, is_current)
+                    api_key, data, stage_name, on_response, budget, is_current,
+                    **request_options)
             except StaleReview:
                 if stage_debug is not None:
                     stage_debug.update(status="stale", error="StaleReview")

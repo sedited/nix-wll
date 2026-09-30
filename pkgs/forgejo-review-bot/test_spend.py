@@ -42,6 +42,27 @@ class SpendTests(unittest.TestCase):
         self.assertTrue(supports_model("gpt-6.1-sol"))
         self.assertFalse(supports_model("gpt-6-luna-unrecognized"))
 
+    def test_glm_rates_have_no_cache_discount_or_long_context_multiplier(self):
+        usage = {"input_tokens": 1_000_000,
+                 "input_tokens_details": {"cached_tokens": 100_000,
+                                          "cache_write_tokens": 100_000},
+                 "output_tokens": 1_000_000}
+        self.assertEqual(str(price_usd("glm-5.3", usage)), "6.119000")
+        self.assertEqual(price_usd("z-ai/glm-5.3", usage),
+                         price_usd("glm-5.3", usage))
+        self.assertTrue(supports_model("glm-5.3"))
+        self.assertTrue(supports_model("z-ai/glm-5.3"))
+        del usage["input_tokens_details"]
+        self.assertEqual(str(price_usd("glm-5.3", usage)), "6.119000")
+        ledger = Ledger(self.path, review_limit_usd=10, input_padding_tokens=0)
+        payload = {"max_output_tokens": 1_000_000}
+        expected_input = ledger._payload_bytes(payload) + 1_000_000
+        estimate = ledger.reserve_estimate_micros(
+            "glm-5.3", payload, extra_input_tokens=1_000_000)
+        self.assertEqual(estimate,
+                         int(price_usd("glm-5.3", {"input_tokens": expected_input,
+                             "output_tokens": 1_000_000}) * MICRODOLLARS))
+
     def test_missing_usage_is_unknown_and_missing_cache_writes_is_conservative(self):
         self.assertIsNone(price_usd("gpt-6-luna", {"input_tokens": 10}))
         usage = {"input_tokens": 1_000_000, "output_tokens": 0,

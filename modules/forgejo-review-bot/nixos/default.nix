@@ -33,10 +33,14 @@ let
     cfg.auditPromptDir
     "--review-budget-usd"
     (toString cfg.reviewBudgetUsd)
+    "--ppq-review-budget-usd"
+    (toString cfg.ppqReviewBudgetUsd)
     "--routing-mode"
     cfg.routingMode
     "--openai-key-file"
     cfg.openaiKeyFile
+    "--ppq-key-file"
+    cfg.ppqKeyFile
     "--webhook-secret-file"
     cfg.webhookSecretFile
     "--forgejo-token-file"
@@ -136,6 +140,12 @@ in
       '';
     };
 
+    ppqReviewBudgetUsd = lib.mkOption {
+      type = lib.types.addCheck lib.types.number (value: value > 0);
+      default = 0.50;
+      description = "Separate per-review spending ceiling in USD for the PPQ GLM pass.";
+    };
+
     monthlyBudgetUsd = lib.mkOption {
       type = lib.types.nullOr (lib.types.addCheck lib.types.number (value: value > 0));
       default = null;
@@ -177,6 +187,11 @@ in
     openaiKeyFile = lib.mkOption {
       type = lib.types.str;
       description = "Path to a file containing the OpenAI API key.";
+    };
+
+    ppqKeyFile = lib.mkOption {
+      type = lib.types.str;
+      description = "Path to a file containing the PPQ API key for GLM adversarial review.";
     };
 
     webhookSecretFile = lib.mkOption {

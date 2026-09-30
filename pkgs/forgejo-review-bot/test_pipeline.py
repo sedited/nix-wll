@@ -1,7 +1,8 @@
 import json
+from threading import Barrier
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from forgejo_review_bot import config, model, pipeline, repository
 
@@ -49,14 +50,61 @@ class PipelineTests(unittest.TestCase):
             {"id": item["id"], "title": item["title"], "body": item["body"]} for item in findings
         ]}), {"status": "completed"}
 
-    def run_review(self, reviewer, editor=None, budget=None):
+    def run_review(self, reviewer, editor=None, budget=None, ppq_api_key=None, ppq_budget=None):
         with patch.object(pipeline.routing, "plan_review", side_effect=self.plan), \
                 patch.object(model, "openai_review", side_effect=reviewer), \
                 patch.object(model, "run_audit", side_effect=editor or self.edit), \
                 patch.object(pipeline, "audit_developer_notes", return_value="Policy"):
             return pipeline.review_with_independent_passes(
                 "key", "PR diff", self.snapshot, self.config, self.prompts, 42, self.debug,
-                budget=budget)
+                budget=budget, ppq_api_key=ppq_api_key, ppq_budget=ppq_budget)
+
+    def test_parallel_adversarial_models_share_context_and_attribute_merged_finding(self):
+        self.tier, self.audits = "sensitive", []
+        self.profiles = ["consensus", "wallet"]
+        openai_budget = Mock()
+        ppq_budget = Mock()
+        openai_budget.summary.return_value = {"limit_usd": "1", "provider": "openai"}
+        ppq_budget.summary.return_value = {"limit_usd": "1", "provider": "ppq"}
+        rendezvous = Barrier(2)
+        inputs = {}
+
+        def review(*args, **kwargs):
+            stage = kwargs["stage_name"]
+            if stage in pipeline.ADVERSARIAL_STAGES:
+                inputs[stage] = (args[1], kwargs["prompt"], kwargs["tools"],
+                                 kwargs["reasoning_effort"], kwargs["max_output_tokens"])
+                if stage == "adversarial_glm":
+                    self.assertIs(kwargs["budget"], ppq_budget)
+                    self.assertEqual(args[0], "ppq-key")
+                    self.assertEqual(kwargs["model"], "glm-5.3")
+                    self.assertEqual(kwargs["api_base"], "https://api.ppq.ai/v1")
+                else:
+                    self.assertIs(kwargs["budget"], openai_budget)
+                    self.assertEqual(args[0], "key")
+                    self.assertNotIn("api_base", kwargs)
+                rendezvous.wait(timeout=5)
+                return discovery([candidate()])
+            if stage == "verifier":
+                candidates = json.loads(args[1].split("Candidate findings:\n")[1])
+                self.assertEqual([item["id"] for item in candidates],
+                                 ["adversarial:1", "adversarial_glm:1"])
+                return json.dumps({"coverage": COMPLETE, "decisions": [
+                    {"candidate_ids": ["adversarial:1", "adversarial_glm:1"],
+                     "disposition": "publish", "reason": "Shared finding",
+                     "finding": self.published}]})
+            return discovery()
+
+        self.run_review(review, ppq_api_key="ppq-key",
+                        budget=openai_budget, ppq_budget=ppq_budget)
+        ppq_budget.protect_verifier.assert_not_called()
+        self.assertEqual(self.debug["ppq_budget"], ppq_budget.summary.return_value)
+        self.assertEqual(self.debug["budget"], openai_budget.summary.return_value)
+        self.assertEqual(inputs["adversarial"], inputs["adversarial_glm"])
+        finding = self.debug["finding_attribution"][0]
+        self.assertEqual(finding["raised_by"], ["adversarial", "adversarial_glm"])
+        self.assertEqual(finding["raised_by_models"], ["glm-5.3", "gpt-6.1-sol"])
+        self.assertEqual(self.debug["stages"]["adversarial_glm"]["status"], "completed")
 
     def test_routine_review_keeps_luna_editor_and_sends_only_accepted_findings(self):
         self.tier, self.audits = "standard", ["tests", "design"]

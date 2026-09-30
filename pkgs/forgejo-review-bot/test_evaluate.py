@@ -433,7 +433,8 @@ class EvaluateTests(unittest.TestCase):
             self.assertEqual(evaluate.main([
                 "run", "--state-dir", str(self.root / "state"),
                 "--output-dir", str(self.root / "runs"),
-                "--openai-key-file", str(key_file), str(manifest),
+                "--openai-key-file", str(key_file),
+                "--ppq-key-file", str(key_file), str(manifest),
             ]), 0)
         artifact = json.loads(Path(output.getvalue().strip()).read_text(encoding="utf-8"))
         self.assertEqual(artifact["status"], "completed")

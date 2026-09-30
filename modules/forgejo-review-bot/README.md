@@ -35,9 +35,10 @@ failed routing requests the full set. Routine changes use Luna.
 Header changes follow their domain's sensitivity rules; the `.h` extension
 alone does not force a full review. The router and reviewers can escalate
 based on changed behavior and inspect relevant headers with their tools.
-Sensitive changes also receive an independent Sol adversarial review. Selected
-consensus, wallet, and P2P profiles add domain-specific instructions to that
-single call. Concurrency covers C++ lifetime, locks and shared state; state
+Sensitive changes receive parallel independent Sol 6.1 and GLM-5.3
+adversarial reviews. GLM uses PPQ at `https://api.ppq.ai/v1/responses`.
+Selected consensus, wallet, and P2P profiles add the same domain instructions
+to both reviews. Concurrency covers C++ lifetime, locks and shared state; state
 covers persistence and recovery. Public-contract and build audits cover exposed
 behavior and portability respectively. These correctness checks run before
 tests and design. Reviewers can escalate when inspection reveals sensitive
@@ -55,14 +56,14 @@ correct. It compares the claimed outcome with what the mechanism guarantees.
 Grounded design questions can be published when their factual premise is
 verified and the answer would settle a material tradeoff.
 
-The Luna design pass uses extra-high reasoning. Sol adversarial review and
+The Luna design pass uses extra-high reasoning. Both adversarial reviews and
 Luna verification of sensitive reviews use high reasoning. These stages each
 have a 25,000-token allowance per response for reasoning and visible output
 combined. This is initial headroom, not a measured optimum or a request for
 longer findings. Concurrency uses medium reasoning with 8,000 tokens. Other
 stages use low reasoning; ordinary verification retains 8,000 tokens.
-Debug output records the settings and actual usage. The same per-review
-spending ceiling applies.
+Debug output records the settings and actual usage. OpenAI stages share their per-review spending ceiling. GLM has its own
+USD 0.50 per-review ceiling and ledger.
 
 Accepted design concerns appear under "Design and approach", after critical
 bugs and before the remaining findings. Empty sections are omitted. The Luna
@@ -71,7 +72,7 @@ classification. It retains its 6,000-token output limit; an incomplete or
 invalid edit falls back to the verifier's wording without truncating findings.
 
 Routine discovery stages get up to 12 tool inspections, standard stages 24,
-and sensitive stages 48. The independent adversarial pass and verifier each get
+and sensitive stages 48. The adversarial passes and verifier each get
 48. With an allowance of N inspections, the model can make up to N tool calls
 across at most N + 1 responses, leaving a final response without tools. The
 router and writing pass have no tools. The final response and all inspections
@@ -88,8 +89,8 @@ coverage alone does not discard findings. Broken candidate accounting or a
 failed verifier still prevents publication of unverified findings. If only
 editing fails, the verified wording is used.
 
-The default per-review spending ceiling is USD 1.00. It is an allowance for
-complex reviews, not a target spend. Lightweight routing still skips Sol and
+The default OpenAI per-review spending ceiling is USD 1.00. It is an allowance for
+complex reviews, not a target spend. Lightweight routing still skips both adversarial passes and
 irrelevant specialist stages. Before each API request the bot reserves a
 conservative input/output cost estimate, holding some allowance for verification
 based on its actual model, input, response limit and bounded evidence headroom.
@@ -114,7 +115,7 @@ payload. Transient failures have bounded retries; pending claims recover when
 the service restarts. The bot retains one editable comment per PR.
 
 The collapsed public debug section includes a finding-attribution table with
-the final title, discovering agents, verifier and editor. Merged candidates
+the final title, discovering agents and their models, verifier and editor. Merged candidates
 retain all their source agents; a finding first discovered during verification
 is credited to the verifier. Editing never earns discovery credit. Per-stage
 summaries show candidate dispositions, accepted findings found solely or jointly,
@@ -149,6 +150,7 @@ automatically rerun previously reviewed heads.
     botLogin = "review-bot";
 
     openaiKeyFile = "/run/secrets/forgejo-review-bot/openai-key";
+    ppqKeyFile = "/run/secrets/forgejo-review-bot/ppq-key";
     webhookSecretFile = "/run/secrets/forgejo-review-bot/webhook-secret";
     forgejoTokenFile = "/run/secrets/forgejo-review-bot/forgejo-token";
   };
@@ -172,6 +174,7 @@ Required deployment options:
   `/api/v1/repos/owner/repo`.
 - `services.forgejoReviewBot.openaiKeyFile`: file containing the OpenAI API
   key.
+- `services.forgejoReviewBot.ppqKeyFile`: file containing the PPQ API key.
 - `services.forgejoReviewBot.webhookSecretFile`: file containing the Forgejo
   webhook secret.
 - `services.forgejoReviewBot.forgejoTokenFile`: file containing the Forgejo API
@@ -198,14 +201,16 @@ be derived from `forgejoApi`.
 
 - `reviewBudgetUsd = 1.00`: per-review spending ceiling. It spans retries and
   is not a target spend.
-- `monthlyBudgetUsd = null`: optional ceiling on the month's recorded charges
+- `ppqReviewBudgetUsd = 0.50`: separate ceiling for the GLM pass, using
+  `ppq-spend.sqlite3`. GLM preserves room for its own final response.
+- `monthlyBudgetUsd = null`: optional OpenAI ceiling on the month's recorded charges
   and outstanding reservations.
 - `routingMode = "enabled"`: apply conservative routing.
 - `routingMode = "shadow"`: record the proposed route while requesting every
   audit. This costs more and still respects the same allowance.
 - `routingMode = "full"`: request every audit without calling the router.
 - `modelsJson = null`: optional per-stage replacement for the model map.
-  The map must include router, independent, adversarial, concurrency, state,
+  The map must include router, independent, adversarial, adversarial_glm, concurrency, state,
   public_contract, tests, design, build, verifier and collator.
   Prices must also be supported by the bot's ledger.
 
@@ -275,3 +280,10 @@ rules or removing a specialist.
 See [the evaluation guide](evaluation.md) for offline summaries and a human
 scorecard for comparing coverage and cost. Summaries use recorded attribution;
 they do not automatically decide whether a finding is correct or useful.
+
+The service and evaluation run command require `--ppq-key-file`. Compare
+`adversarial` and `adversarial_glm` in debug stage metrics for sole/shared
+accepted findings and published, dropped or unresolved candidates. OpenAI has a USD 1.00 ceiling and GLM has a separate USD 0.50 ceiling; incomplete passes
+are not evidence of model quality.
+PPQ GLM rates use the model catalog input/output prices without cache discounts.
+See [PPQ integration guide](https://ppq.ai/llms.txt).

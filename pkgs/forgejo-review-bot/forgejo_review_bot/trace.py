@@ -178,7 +178,7 @@ def review_trace(debug, prompt_config):
     if attribution:
         trace["finding_attribution"] = attribution
     trace["stage_metrics"] = stage_metrics(debug)
-    for key in ("routing", "coverage", "candidate_sources", "verification_budget"):
+    for key in ("routing", "coverage", "candidate_sources", "verification_budget", "ppq_budget"):
         if key in debug:
             trace[key] = debug[key]
     if debug.get("stage_outputs"):
@@ -231,6 +231,7 @@ def _attribution_table(attribution):
             f"<td>{_html_cell(finding.get('title'))}</td>"
             f"<td>{_html_cell(location)}</td>"
             f"<td>{_html_cell(finding.get('raised_by'))}</td>"
+            f"<td>{_html_cell(finding.get('raised_by_models'))}</td>"
             f"<td>{_html_cell(finding.get('verified_by'))}</td>"
             f"<td>{_html_cell(finding.get('edited_by'))}</td>"
             f"<td>{_html_cell(finding.get('candidate_ids'))}</td>"
@@ -238,7 +239,7 @@ def _attribution_table(attribution):
     return (
         "<table>\n"
         "<thead><tr><th>ID</th><th>Finding</th><th>Location</th>"
-        "<th>Raised by</th><th>Verified by</th><th>Edited by</th>"
+        "<th>Raised by</th><th>Models</th><th>Verified by</th><th>Edited by</th>"
         "<th>Candidates</th></tr></thead>\n"
         f"<tbody>{''.join(rows)}</tbody>\n"
         "</table>\n\n")
@@ -259,6 +260,7 @@ def save_review_trace(state_dir, number, head_sha, content, debug, prompt_config
               "stage_outputs": debug.get("stage_outputs", {}),
               "stages": debug.get("stages", {}),
               "budget": debug.get("budget"),
+              "ppq_budget": debug.get("ppq_budget"),
               "candidate_sources": debug.get("candidate_sources", {}),
               "decisions": debug.get("decisions", []),
               "finding_attribution": debug.get("finding_attribution", []),

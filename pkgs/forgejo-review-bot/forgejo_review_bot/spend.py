@@ -13,6 +13,8 @@ MICRODOLLARS = 1_000_000
 THRESHOLD_TOKENS = 272_000
 FINAL_TOOL_OUTPUT_HEADROOM_TOKENS = 13_000
 RATES = {
+    "glm-5.3": (Decimal("1.477"), Decimal("1.477"),
+                Decimal("1.477"), Decimal("4.642")),
     "gpt-6-luna": (Decimal("0.1"), Decimal("0.01"),
                    Decimal("0.125"), Decimal("0.5")),
     "gpt-6.1-sol": (Decimal("2"), Decimal("0.1"),
@@ -65,7 +67,9 @@ def price_usd(model, usage):
     if cache_write_tokens is None:
         # Treat every uncached input token as a cache write, the highest input rate.
         cache_write_tokens = input_tokens - cached_tokens
-    multiplier = Decimal(2) if input_tokens > THRESHOLD_TOKENS else Decimal(1)
+    multiplier = (Decimal(2) if model not in {"glm-5.3", "z-ai/glm-5.3"}
+                  and input_tokens > THRESHOLD_TOKENS
+                  else Decimal(1))
     input_rate, cached_rate, write_rate, output_rate = rates
     if multiplier == 2:
         output_rate *= Decimal("1.5")
@@ -79,7 +83,7 @@ def price_usd(model, usage):
 
 
 def _rates_for_model(model):
-    rates = RATES.get(model)
+    rates = RATES.get("glm-5.3" if model == "z-ai/glm-5.3" else model)
     if rates is not None:
         return rates
     match = SNAPSHOT_MODEL.fullmatch(model or "")
@@ -178,7 +182,8 @@ class Ledger:
         # of the eventual invoice amount.
         input_tokens = (self._payload_bytes(payload) + self.input_padding_tokens
                         + extra_input_tokens)
-        multiplier = Decimal(2) if input_tokens > THRESHOLD_TOKENS else Decimal(1)
+        multiplier = (Decimal(2) if model not in {"glm-5.3", "z-ai/glm-5.3"}
+                      and input_tokens > THRESHOLD_TOKENS else Decimal(1))
         input_rate = max(rates[:3]) * multiplier
         output_rate = rates[3] * (Decimal("1.5") if multiplier == 2 else Decimal(1))
         dollars = (Decimal(input_tokens) * input_rate
@@ -337,7 +342,7 @@ class RequestBudget:
                 "continuation_usd": continuation / MICRODOLLARS}
 
     def _fallback_floor_micros(self, stage):
-        if stage in {"verifier", "collator"}:
+        if stage in {"verifier", "collator", "adversarial_glm"}:
             return 0
         if self.verifier_floor_micros:
             return self.verifier_floor_micros

@@ -7,6 +7,7 @@
     botLogin = "review-bot";
 
     openaiKeyFile = "/run/secrets/forgejo-review-bot/openai-key";
+    ppqKeyFile = "/run/secrets/forgejo-review-bot/ppq-key";
     webhookSecretFile = "/run/secrets/forgejo-review-bot/webhook-secret";
     forgejoTokenFile = "/run/secrets/forgejo-review-bot/forgejo-token";
   };

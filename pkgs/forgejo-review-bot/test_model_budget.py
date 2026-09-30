@@ -294,10 +294,13 @@ class ModelBudgetTests(unittest.TestCase):
                 patch.object(model, "read_file", return_value="1: evidence") as read:
             answer = model.openai_review(
                 "secret", "patch", self.snapshot, SimpleNamespace(),
-                self.prompt_config, debug, budget=budget, response_schema=schema)
+                self.prompt_config, debug, budget=budget, response_schema=schema,
+                api_base="https://api.ppq.ai/v1")
         self.assertEqual(answer, raw)
         self.assertEqual(read.call_count, 1)
         self.assertEqual(send.call_count, 2)
+        self.assertEqual([call.args[0].full_url for call in send.call_args_list],
+                         ["https://api.ppq.ai/v1/responses"] * 2)
         sent = json.loads(send.call_args_list[-1].args[0].data)
         self.assertEqual(sent["tool_choice"], "none")
         self.assertEqual(sent["input"][0]["role"], "user")
