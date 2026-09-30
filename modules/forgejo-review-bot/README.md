@@ -47,9 +47,10 @@ verified and the answer would settle a material tradeoff.
 
 The Luna design pass uses extra-high reasoning with a 25,000-token allowance
 per response for reasoning and visible output combined. This is initial
-headroom, not a measured optimum or a request for longer findings. The other
-stages use low reasoning. Debug output records the settings and actual usage;
-the same per-review spending ceiling applies.
+headroom, not a measured optimum or a request for longer findings. The
+adversarial pass uses high reasoning; the other stages use low reasoning.
+Debug output records the settings and actual usage. The same per-review
+spending ceiling applies.
 
 Accepted design concerns appear under "Design and approach", after critical
 bugs and before the remaining findings. Empty sections are omitted. The Luna

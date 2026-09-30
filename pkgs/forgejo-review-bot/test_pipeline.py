@@ -85,10 +85,12 @@ class PipelineTests(unittest.TestCase):
 
     def test_sensitive_discovery_uses_sol_and_failed_audit_keeps_partial_usage(self):
         self.tier, self.audits = "sensitive", ["design"]
+        efforts = {}
 
         def review(*args, **kwargs):
             stage = kwargs["stage_name"]
             self.calls.append((stage, kwargs["model"]))
+            efforts[stage] = kwargs["reasoning_effort"]
             if stage == "design":
                 args[5]["turns"].append({"input_tokens": 100, "output_tokens": 10})
                 raise TimeoutError()
@@ -98,6 +100,7 @@ class PipelineTests(unittest.TestCase):
 
         content = self.run_review(review)
         self.assertIn(("adversarial", "gpt-6.1-sol"), self.calls)
+        self.assertEqual(efforts["adversarial"], "high")
         self.assertIn(("verifier", "gpt-6-luna"), self.calls)
         self.assertIn("incomplete", content)
         self.assertEqual(self.debug["stages"]["design"]["turns"][0]["input_tokens"], 100)
