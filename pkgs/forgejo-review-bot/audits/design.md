@@ -17,6 +17,16 @@ Ask whether existing project facilities or a standard mechanism could express
 the requirement with fewer interacting states or ordering obligations. Read the
 relevant implementation and comparable project code before recommending it.
 
+When a default is introduced or changed, check who it serves and what happens
+when users leave it unchanged. Is it safe, correct, and useful for typical
+workloads? Identify tradeoffs for other supported workloads and whether users
+can reasonably discover and override it. Distinguish measurements, established
+conventions, constraints, and judgment calls. For consequential thresholds,
+limits, timeouts, or resource allocations, look for representative measurements
+or a concrete rationale. Flag an unsupported choice only when you can explain
+how it could materially affect users. Do not demand benchmarks for harmless
+choices or treat every judgment call as a defect.
+
 Return the discovery object in the supplied schema, including coverage and
 limitations. For each grounded suggestion, identify the current cost, concrete
 alternative, required behavior it preserves, and any tradeoff or unresolved
