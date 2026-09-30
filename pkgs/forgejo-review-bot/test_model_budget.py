@@ -236,17 +236,83 @@ class ModelBudgetTests(unittest.TestCase):
 
     def test_budget_rejection_has_no_request_turn(self):
         class RejectedBudget:
+            def __init__(self):
+                self.choices = []
+
             def reserve(self, _stage, _data):
+                self.choices.append(_data["tool_choice"])
                 raise BudgetExceeded("limit")
 
+        budget = RejectedBudget()
         stage = {"model": "gpt-6-luna", "status": "running", "turns": [], "tools": []}
         with patch.object(model.urllib.request, "urlopen") as send:
             with self.assertRaises(BudgetExceeded):
                 model.openai_review("secret", "patch", self.snapshot, SimpleNamespace(),
-                                    self.prompt_config, stage, budget=RejectedBudget())
+                                    self.prompt_config, stage, budget=budget)
         send.assert_not_called()
+        self.assertEqual(budget.choices, ["required"])
         self.assertEqual(stage["turns"], [])
         self.assertEqual(stage["status"], "budget_exhausted")
+
+    def test_budget_rejection_after_inspection_finishes_without_tools(self):
+        class OneInspectionBudget:
+            def __init__(self):
+                self.events = []
+
+            def reserve(self, stage, data):
+                self.events.append(("reserve", stage, data["tool_choice"]))
+                if data["tool_choice"] == "auto":
+                    raise BudgetExceeded("limit")
+                return "token"
+
+            def settle(self, token, response):
+                self.events.append(("settle", token, response.get("id")))
+
+            def fail(self, token, charged_unknown=True):
+                self.events.append(("fail", token, charged_unknown))
+
+        raw = json.dumps({
+            "coverage": {"status": "partial",
+                         "limitations": ["Budget prevented more inspection"]},
+            "findings": [],
+            "requires_sensitive_review": False,
+        })
+        first = {"id": "first-tool", "model": "gpt-6-luna",
+                 "status": "completed", "output": [
+                     {"type": "function_call", "call_id": "call-1",
+                      "name": "read_file",
+                      "arguments": '{"path":"src/a.cpp","start_line":1}'}]}
+        final = {"id": "forced-final", "model": "gpt-6-luna",
+                 "status": "completed", "output": [
+                     {"type": "message", "content": [
+                         {"type": "output_text", "text": raw}]}]}
+        schema = {"type": "object", "properties": {}, "additionalProperties": True}
+        debug = {}
+        budget = OneInspectionBudget()
+        with patch.object(model.urllib.request, "urlopen",
+                          side_effect=[Response(first), Response(final)]) as send, \
+                patch.object(model, "read_file", return_value="1: evidence") as read:
+            answer = model.openai_review(
+                "secret", "patch", self.snapshot, SimpleNamespace(),
+                self.prompt_config, debug, budget=budget, response_schema=schema)
+        self.assertEqual(answer, raw)
+        self.assertEqual(read.call_count, 1)
+        self.assertEqual(send.call_count, 2)
+        sent = json.loads(send.call_args_list[-1].args[0].data)
+        self.assertEqual(sent["tool_choice"], "none")
+        self.assertEqual(sent["input"][0]["role"], "user")
+        self.assertEqual(sent["input"][1]["type"], "function_call")
+        self.assertEqual(sent["input"][2]["type"], "function_call_output")
+        self.assertIn("Budget is near", sent["input"][-1]["content"])
+        self.assertEqual([turn["tool_choice"] for turn in debug["turns"]],
+                         ["required", "none"])
+        self.assertTrue(debug["turns"][1]["budget_forced_final"])
+        self.assertEqual(budget.events,
+                         [("reserve", "independent", "required"),
+                          ("settle", "token", "first-tool"),
+                          ("reserve", "independent", "auto"),
+                          ("reserve", "independent", "none"),
+                          ("settle", "token", "forced-final")])
 
     def test_request_budget_applies_scaled_stage_headroom(self):
         class LedgerSpy:
@@ -255,8 +321,12 @@ class ModelBudgetTests(unittest.TestCase):
             def __init__(self):
                 self.calls = []
 
-            def reserve(self, stage, model, data, review_id, reserve_floor_usd):
-                self.calls.append((stage, model, review_id, reserve_floor_usd))
+            def reserve_estimate_micros(self, model, data, extra_input_tokens=0):
+                return 1000 if model == "gpt-6-luna" else 10_000
+
+            def reserve(self, stage, model, data, review_id, reserve_floor_usd=0,
+                        reserve_floor_micros=0):
+                self.calls.append((stage, model, review_id, reserve_floor_micros))
                 return "token"
 
         ledger = LedgerSpy()
@@ -265,7 +335,17 @@ class ModelBudgetTests(unittest.TestCase):
         budget.reserve("independent", data)
         budget.reserve("verifier", data)
         budget.reserve("collator", data)
-        self.assertEqual([call[3] for call in ledger.calls], [0.04, 0.01, 0])
+        self.assertEqual([call[3] for call in ledger.calls], [40_000, 0, 0])
+
+        protection = budget.protect_verifier(
+            {"model": "gpt-6.1-sol", "max_output_tokens": 1,
+             "tools": [{"type": "function"}], "tool_choice": "required"})
+        self.assertEqual(protection["protected_micros"], 20_000)
+        self.assertEqual(protection["initial_usd"], 0.01)
+        self.assertEqual(protection["continuation_usd"], 0.01)
+        budget.reserve("independent", data)
+        budget.reserve("verifier", data)
+        self.assertEqual([call[3] for call in ledger.calls][-2:], [20_000, 0])
 
 
 if __name__ == "__main__":

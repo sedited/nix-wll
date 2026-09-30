@@ -4,7 +4,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from forgejo_review_bot.spend import BudgetExceeded, Ledger, price_usd
+from forgejo_review_bot.spend import (MICRODOLLARS, FINAL_TOOL_OUTPUT_HEADROOM_TOKENS,
+                                      BudgetExceeded, Ledger, RequestBudget,
+                                      price_usd, supports_model)
 
 
 class SpendTests(unittest.TestCase):
@@ -37,6 +39,8 @@ class SpendTests(unittest.TestCase):
         self.assertEqual(price_usd(snapshot, long_context),
                          price_usd("gpt-6-luna", long_context))
         self.assertIsNone(price_usd("gpt-6-luna-unrecognized", long_context))
+        self.assertTrue(supports_model("gpt-6.1-sol"))
+        self.assertFalse(supports_model("gpt-6-luna-unrecognized"))
 
     def test_missing_usage_is_unknown_and_missing_cache_writes_is_conservative(self):
         self.assertIsNone(price_usd("gpt-6-luna", {"input_tokens": 10}))
@@ -138,6 +142,45 @@ class SpendTests(unittest.TestCase):
         self.assertIsNone(summary["month"])
         self.assertAlmostEqual(summary["estimated_total_usd"], 0.0006)
         self.assertTrue(summary["usage_complete"])
+
+    def test_protected_verifier_floor_preserves_start_and_final(self):
+        sizing = Ledger(self.path.with_name("sizing.sqlite3"),
+                        review_limit_usd=1, input_padding_tokens=0)
+        verifier = {"model": "gpt-6.1-sol", "max_output_tokens": 25_000,
+                    "input": "Candidate findings: []", "tools": [{"type": "function"}],
+                    "tool_choice": "required"}
+        discovery = {"model": "gpt-6-luna", "max_output_tokens": 1_000,
+                     "input": "review"}
+        initial = sizing.reserve_estimate_micros(verifier["model"], verifier)
+        continuation = sizing.reserve_estimate_micros(
+            verifier["model"], {**verifier, "tool_choice": "none"},
+            extra_input_tokens=FINAL_TOOL_OUTPUT_HEADROOM_TOKENS)
+        floor = initial + continuation
+        discovery_cost = sizing.reserve_estimate_micros(discovery["model"], discovery)
+        limit = (floor + discovery_cost) / MICRODOLLARS
+
+        ledger = Ledger(self.path.with_name("protected.sqlite3"),
+                        review_limit_usd=limit, input_padding_tokens=0)
+        budget = RequestBudget(ledger, "pr-6")
+        protection = budget.protect_verifier(verifier)
+
+        self.assertEqual(protection["protected_micros"], floor)
+        self.assertEqual(protection["initial_usd"], initial / MICRODOLLARS)
+        self.assertEqual(protection["continuation_usd"], continuation / MICRODOLLARS)
+        budget.reserve("independent", discovery)
+        token = budget.reserve("verifier", verifier)
+        self.assertTrue(token)
+        self.assertEqual(ledger.summary(review_id="pr-6")["unknown_request_count"], 2)
+
+    def test_verifier_protection_uses_configured_model_rates(self):
+        ledger = Ledger(self.path, review_limit_usd=1, input_padding_tokens=0)
+        budget = RequestBudget(ledger, "pr-7")
+        payload = {"model": "gpt-6-luna", "max_output_tokens": 8_000,
+                   "input": "Candidate findings: []"}
+        luna = budget.protect_verifier(payload)["protected_micros"]
+        sol = budget.protect_verifier({**payload, "model": "gpt-6.1-sol"})[
+            "protected_micros"]
+        self.assertGreater(sol, luna)
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ from pathlib import Path
 
 MICRODOLLARS = 1_000_000
 THRESHOLD_TOKENS = 272_000
+FINAL_TOOL_OUTPUT_HEADROOM_TOKENS = 13_000
 RATES = {
     "gpt-6-luna": (Decimal("0.1"), Decimal("0.01"),
                    Decimal("0.125"), Decimal("0.5")),
@@ -85,6 +86,11 @@ def _rates_for_model(model):
     return RATES.get(match.group(1)) if match else None
 
 
+def supports_model(model):
+    """Return whether spend accounting has rates for this model name."""
+    return _rates_for_model(model) is not None
+
+
 def _micros(dollars):
     try:
         amount = Decimal(str(dollars))
@@ -154,10 +160,13 @@ class Ledger:
             return len(payload.encode("utf-8"))
         return len(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
 
-    def _reserve_cost(self, model, payload):
+    def reserve_estimate_micros(self, model, payload, extra_input_tokens=0):
         rates = _rates_for_model(model)
         if rates is None:
             raise ValueError(f"No configured rates for model {model!r}")
+        extra_input_tokens = int(extra_input_tokens)
+        if extra_input_tokens < 0:
+            raise ValueError("extra_input_tokens must be nonnegative")
         try:
             request = json.loads(payload) if isinstance(payload, (bytes, str)) else payload
             max_output_tokens = int(request["max_output_tokens"])
@@ -167,7 +176,8 @@ class Ledger:
             raise ValueError("max_output_tokens must be nonnegative")
         # Byte length plus padding is a coarse preflight estimate, not a guarantee
         # of the eventual invoice amount.
-        input_tokens = self._payload_bytes(payload) + self.input_padding_tokens
+        input_tokens = (self._payload_bytes(payload) + self.input_padding_tokens
+                        + extra_input_tokens)
         multiplier = Decimal(2) if input_tokens > THRESHOLD_TOKENS else Decimal(1)
         input_rate = max(rates[:3]) * multiplier
         output_rate = rates[3] * (Decimal("1.5") if multiplier == 2 else Decimal(1))
@@ -175,10 +185,13 @@ class Ledger:
                    + Decimal(max_output_tokens) * output_rate) / Decimal(1_000_000)
         return int((dollars * MICRODOLLARS).to_integral_value(rounding=ROUND_CEILING))
 
-    def reserve(self, stage, model, payload, review_id, reserve_floor_usd=0):
+    def reserve(self, stage, model, payload, review_id, reserve_floor_usd=0,
+                reserve_floor_micros=0):
         """Reserve an upper cost estimate and return the request token."""
-        amount = self._reserve_cost(model, payload)
-        floor = _micros(reserve_floor_usd)
+        amount = self.reserve_estimate_micros(model, payload)
+        floor = _micros(reserve_floor_usd) + int(reserve_floor_micros)
+        if floor < 0:
+            raise ValueError("reserve_floor_micros must be nonnegative")
         month = _month_now()
         token = str(uuid.uuid4())
         with self._connection() as db:
@@ -200,7 +213,7 @@ class Ledger:
                     "FROM requests WHERE month=? AND status IN ('reserved','uncertain','unknown','settled')",
                     (month,),
                 ).fetchone()[0]
-                if current + amount > self.monthly_limit_micros:
+                if current + amount + floor > self.monthly_limit_micros:
                     db.rollback()
                     raise BudgetExceeded("monthly spend limit would be exceeded")
             db.execute("INSERT INTO requests VALUES (?, ?, ?, ?, ?, NULL, 'reserved', NULL, NULL, ?)",
@@ -310,20 +323,42 @@ class RequestBudget:
     def __init__(self, ledger, review_id):
         self.ledger = ledger
         self.review_id = review_id
+        self.verifier_floor_micros = 0
 
-    def reserve(self, stage, data):
-        model = data["model"]
+    def protect_verifier(self, payload):
+        """Protect the verifier's required first turn and final turn."""
+        model = payload["model"]
+        initial = self.ledger.reserve_estimate_micros(model, payload)
+        continuation = self._continuation_floor_micros(payload)
+        self.verifier_floor_micros = initial + continuation
+        return {"protected_usd": self.verifier_floor_micros / MICRODOLLARS,
+                "protected_micros": self.verifier_floor_micros,
+                "initial_usd": initial / MICRODOLLARS,
+                "continuation_usd": continuation / MICRODOLLARS}
+
+    def _fallback_floor_micros(self, stage):
+        if stage in {"verifier", "collator"}:
+            return 0
+        if self.verifier_floor_micros:
+            return self.verifier_floor_micros
         limit = self.ledger.review_limit_micros
         scale = (1 if limit is None else
                  min(1, limit / (0.60 * MICRODOLLARS)))
-        if stage == "verifier":
-            headroom = 0.02 * scale
-        elif stage == "collator":
-            headroom = 0
-        else:
-            headroom = 0.08 * scale
+        return int((0.08 * scale) * MICRODOLLARS)
+
+    def _continuation_floor_micros(self, data):
+        if data.get("tool_choice") == "none" or not data.get("tools"):
+            return 0
+        return self.ledger.reserve_estimate_micros(
+            data["model"], {**data, "tool_choice": "none"},
+            extra_input_tokens=FINAL_TOOL_OUTPUT_HEADROOM_TOKENS)
+
+    def reserve(self, stage, data):
+        model = data["model"]
+        floor = (self._fallback_floor_micros(stage)
+                 + self._continuation_floor_micros(data))
         return self.ledger.reserve(stage, model, data, self.review_id,
-                                   reserve_floor_usd=headroom)
+                                   reserve_floor_micros=floor)
 
     def settle(self, token, response):
         return self.ledger.settle(token, response)

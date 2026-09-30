@@ -86,6 +86,10 @@ TOOLS = [
          "required": ["commit", "path"], "additionalProperties": False}},
 ]
 FOCUSED_TOOLS = TOOLS[:5]
+FINISH_WITH_AVAILABLE_EVIDENCE = (
+    "Budget is near the review limit. Do not call tools. Finish now with the "
+    "evidence already available, and preserve uncertainty for any claim that "
+    "still lacks decisive support.")
 
 class StaleReview(Exception):
     """The review no longer targets the current pull request head."""
@@ -281,6 +285,8 @@ def openai_review(api_key, review, snapshot, bot_config, prompt_config, debug=No
             data["text"] = {"format": {"type": "json_schema",
                                         "name": stage_name, "strict": True,
                                         "schema": response_schema}}
+        sent_tool_choice = tool_choice
+        budget_forced_final = False
         try:
             result, payload, elapsed = request_response(
                 api_key, data, stage_name, on_response, budget, is_current)
@@ -289,9 +295,35 @@ def openai_review(api_key, review, snapshot, bot_config, prompt_config, debug=No
                 stage_debug.update(status="stale", error="StaleReview")
             raise
         except BudgetExceeded:
-            if stage_debug is not None:
-                stage_debug.update(status="budget_exhausted", error="BudgetExceeded")
-            raise
+            if tool_choice == "none" or (first_tool_required and calls_used == 0):
+                if stage_debug is not None:
+                    stage_debug.update(status="budget_exhausted", error="BudgetExceeded")
+                raise
+            final_inputs = inputs + [{"role": "user",
+                                      "content": FINISH_WITH_AVAILABLE_EVIDENCE}]
+            data = {**data, "input": final_inputs, "tool_choice": "none"}
+            input_data = json.dumps(final_inputs).encode()
+            sent_tool_choice = "none"
+            budget_forced_final = True
+            try:
+                result, payload, elapsed = request_response(
+                    api_key, data, stage_name, on_response, budget, is_current)
+            except StaleReview:
+                if stage_debug is not None:
+                    stage_debug.update(status="stale", error="StaleReview")
+                raise
+            except BudgetExceeded:
+                if stage_debug is not None:
+                    stage_debug.update(status="budget_exhausted", error="BudgetExceeded")
+                raise
+            except Exception as exc:
+                failure = request_failure_record(data, exc)
+                if debug is not None:
+                    debug["turns"].append(failure)
+                    stage_debug["status"] = "failed"
+                    stage_debug["error"] = failure["error"]
+                raise
+            inputs = final_inputs
         except Exception as exc:
             failure = request_failure_record(data, exc)
             if debug is not None:
@@ -304,9 +336,11 @@ def openai_review(api_key, review, snapshot, bot_config, prompt_config, debug=No
                 **response_record(result, payload, elapsed),
                 "input_bytes": len(input_data),
                 "input_sha256": hashlib.sha256(input_data).hexdigest(),
-                "tool_choice": tool_choice,
+                "tool_choice": sent_tool_choice,
                 "incomplete_reason": (result.get("incomplete_details") or {}).get("reason"),
             }
+            if budget_forced_final:
+                turn_record["budget_forced_final"] = True
             debug["turns"].append(turn_record)
             stage_debug["status"] = result.get("status")
         if result.get("status") != "completed":
