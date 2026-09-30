@@ -117,7 +117,7 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("state", self.calls)
 
     def test_inspection_allowance_follows_route_and_escalation(self):
-        for tier, expected_limit in (("routine", 6), ("standard", 12), ("sensitive", 24)):
+        for tier, expected_limit in (("routine", 12), ("standard", 24), ("sensitive", 48)):
             with self.subTest(tier=tier):
                 self.tier, self.audits = tier, ["design", "tests"]
                 limits = {}
@@ -133,13 +133,13 @@ class PipelineTests(unittest.TestCase):
                 self.assertEqual(limits["independent"], expected_limit)
                 self.assertEqual(limits["design"], expected_limit)
                 self.assertEqual(limits["tests"], expected_limit)
-                self.assertEqual(limits["verifier"], 24)
+                self.assertEqual(limits["verifier"], 48)
                 if tier == "routine":
                     self.assertNotIn("adversarial", limits)
                 else:
-                    self.assertEqual(limits["adversarial"], 24)
+                    self.assertEqual(limits["adversarial"], 48)
                 if tier == "standard":
-                    self.assertEqual(limits["state"], 24)
+                    self.assertEqual(limits["state"], 48)
 
     def test_missing_verifier_decision_never_publishes_candidate(self):
         self.tier, self.audits = "routine", []

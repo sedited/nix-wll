@@ -12,7 +12,7 @@ from .spend import BudgetExceeded
 DISCOVERY_ORDER = ("adversarial", "design", "tests", "public_contract",
                    "developer_notes", "state")
 FULL_CONTEXT_STAGES = {"independent", "adversarial", "verifier"}
-DISCOVERY_TOOL_LIMITS = {"routine": 6, "standard": 12, "sensitive": 24}
+DISCOVERY_TOOL_LIMITS = {"routine": 12, "standard": 24, "sensitive": 48}
 
 
 def review_with_independent_passes(api_key, review, snapshot, bot_config,
@@ -35,7 +35,7 @@ def review_with_independent_passes(api_key, review, snapshot, bot_config,
         stages[name] = record
         try:
             if tools:
-                calls = (24 if name in {"adversarial", "verifier"}
+                calls = (48 if name in {"adversarial", "verifier"}
                          else DISCOVERY_TOOL_LIMITS[plan["tier"]])
                 output_tokens = {"design": 25_000, "verifier": 8_000}.get(name, 4_000)
                 answer = model.openai_review(

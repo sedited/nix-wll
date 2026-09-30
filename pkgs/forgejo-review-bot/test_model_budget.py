@@ -156,6 +156,23 @@ class ModelBudgetTests(unittest.TestCase):
         self.assertEqual([event[0] for event in budget.events],
                          ["reserve", "settle", "reserve", "settle"])
 
+    def test_sequential_inspections_can_use_allowance_before_final_answer(self):
+        results = [{"status": "completed", "output": [
+            {"type": "function_call", "call_id": f"call-{i}", "name": "read_file",
+             "arguments": '{"path":"src/a.cpp","start_line":1}'}]} for i in range(12)]
+        results.append({"status": "completed", "output": [
+            {"type": "message", "content": [{"type": "output_text", "text": "Review complete."}]}]})
+        with patch.object(model.urllib.request, "urlopen",
+                          side_effect=[Response(item) for item in results]) as send, \
+                patch.object(model, "read_file", return_value="1: evidence") as read:
+            answer = model.openai_review(
+                "secret", "patch", self.snapshot, SimpleNamespace(), self.prompt_config,
+                max_tool_calls=12)
+        self.assertEqual(answer, "Review complete.")
+        self.assertEqual(read.call_count, 12)
+        choices = [json.loads(call.args[0].data)["tool_choice"] for call in send.call_args_list]
+        self.assertEqual(choices, ["required"] + ["auto"] * 11 + ["none"])
+
     def test_stale_review_between_turns_does_not_reserve_again(self):
         call = {"type": "function_call", "call_id": "call-1",
                 "name": "read_file", "arguments": '{"path":"src/a.cpp","start_line":1}'}

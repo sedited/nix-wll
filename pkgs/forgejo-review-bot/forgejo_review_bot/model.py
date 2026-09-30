@@ -11,16 +11,15 @@ from .repository import (find_paths, read_file, read_diff, search_code, blame_ba
                          read_commit)
 from .spend import BudgetExceeded
 
-MAX_TOOL_CALLS = 24
-MAX_MODEL_TURNS = 10
+MAX_TOOL_CALLS = 48
 MAX_OUTPUT_TOKENS = 6_000
 MAX_VERIFIER_OUTPUT_TOKENS = 8_000
 MAX_AUDIT_OUTPUT_TOKENS = 4_000
 MAX_AUDIT_OUTPUT_BYTES = 4_000
 MAX_COLLATOR_OUTPUT_TOKENS = 6_000
 MAX_COLLATOR_OUTPUT_BYTES = 10_000
-MAX_CONTEXT_CALLS = 4
-MAX_HISTORY_CALLS = 4
+MAX_CONTEXT_CALLS = 8
+MAX_HISTORY_CALLS = 8
 SAFE_NO_CHARGE_HTTP_STATUSES = {400, 401, 403, 404, 429}
 TOOLS = [
     {"type": "function", "name": "find_paths", "strict": True,
@@ -267,10 +266,11 @@ def openai_review(api_key, review, snapshot, bot_config, prompt_config, debug=No
     calls_used = 0
     context_calls = 0
     history_calls = 0
-    for turn in range(MAX_MODEL_TURNS):
+    # Allow one inspection per turn, plus a final answer without tools.
+    for turn in range(max_tool_calls + 1):
         input_data = json.dumps(inputs).encode()
         tool_choice = ("none" if calls_used >= max_tool_calls
-                       or turn == MAX_MODEL_TURNS - 1 else
+                       or turn == max_tool_calls else
                        "required" if turn == 0 and first_tool_required else "auto")
         data = {"model": model, "store": False,
                 "reasoning": {"effort": reasoning_effort},

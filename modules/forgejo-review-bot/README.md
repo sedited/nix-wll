@@ -13,10 +13,11 @@ builds, runs, or tests pull request code.
 The model can also search and read other public issues and pull requests in the
 same repository, including a small sample of ordinary comments. The current PR
 is excluded from these tools, so its comments cannot influence the review.
-These reads use no Forgejo credentials and are limited to four calls per review.
+These reads use no Forgejo credentials and are limited to eight calls per
+tool-enabled stage.
 It can inspect up to 20 lines of merge-base blame and read a related ancestor
-commit's message and file diff, with four history calls per review. Tool output
-is capped.
+commit's message and file diff, with eight history calls per tool-enabled stage.
+Tool output is capped.
 
 A Luna router selects relevant specialists, with code rules requiring deeper
 review for sensitive paths and incomplete input. Routine changes use Luna.
@@ -44,12 +45,14 @@ writing pass edits wording but cannot remove accepted findings or change their
 classification. It retains its 6,000-token output limit; an incomplete or
 invalid edit falls back to the verifier's wording without truncating findings.
 
-Each discovery stage gets up to 6 tool inspections for routine reviews, 12 for
-standard reviews, or 24 for sensitive reviews. The verifier gets 24. At the
-inspection limit, further reads are refused and the model gets a final turn
-without tools, subject to the remaining spending allowance. It returns supported
-findings and names material unanswered evidence. Debug output records the limit
-and which requests were skipped.
+Routine discovery stages get up to 12 tool inspections, standard stages 24,
+and sensitive stages 48. The independent adversarial pass and verifier each get
+48. With an allowance of N inspections, the model can make up to N tool calls
+across at most N + 1 responses, leaving a final response without tools. The
+router and writing pass have no tools. The final response and all inspections
+remain subject to the spending ceiling. At the inspection limit, further reads
+are refused. The model returns supported findings and names material unanswered
+evidence. Debug output records the limit and which requests were skipped.
 
 Discovery stages return structured candidates. The verifier accounts for each
 candidate as published, dropped or unresolved, and the writing pass receives
