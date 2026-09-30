@@ -28,16 +28,26 @@ It can inspect up to 20 lines of merge-base blame and read a related ancestor
 commit's message and file diff, with eight history calls per tool-enabled stage.
 Tool output is capped.
 
-A Luna router selects relevant specialists, with code rules requiring deeper
-review for sensitive paths and incomplete input. Routine changes use Luna.
+A Luna router selects relevant specialists even for sensitive paths. Code rules
+set a minimum risk tier and require the applicable domain checks; they do not
+select every audit just because a change is sensitive. Incomplete input or
+failed routing requests the full set. Routine changes use Luna.
 Header changes follow their domain's sensitivity rules; the `.h` extension
 alone does not force a full review. The router and reviewers can escalate
 based on changed behavior and inspect relevant headers with their tools.
-Sensitive changes also receive an independent Sol discovery review. The
-verifier and writing pass stay on Luna. Lightweight routing skips Sol and
-specialist stages that do not fit the change. Design review covers architecture,
-project conventions and taste; the tests audit checks whether coverage
-justifies the amount of test code, fixtures and runtime.
+Sensitive changes also receive an independent Sol adversarial review. Selected
+consensus, wallet, and P2P profiles add domain-specific instructions to that
+single call. Concurrency covers C++ lifetime, locks and shared state; state
+covers persistence and recovery. Public-contract and build audits cover exposed
+behavior and portability respectively. These correctness checks run before
+tests and design. Reviewers can escalate when inspection reveals sensitive
+behavior. Independent reviewers never receive each other's candidates.
+
+The tests audit starts with changed production behavior and existing coverage,
+even when no tests changed. It then judges assertions, fixtures and runtime.
+Design owns architecture, simplicity and applicable merge-base developer notes;
+there is no separate developer-notes stage. Pure test changes can take the
+routine route when the router establishes that deeper checks are unnecessary.
 
 The design audit also weighs practical benefit against recurring contributor
 work, maintenance, confusion and reviewer attention, even when the code is
@@ -45,10 +55,12 @@ correct. It compares the claimed outcome with what the mechanism guarantees.
 Grounded design questions can be published when their factual premise is
 verified and the answer would settle a material tradeoff.
 
-The Luna design pass uses extra-high reasoning with a 25,000-token allowance
-per response for reasoning and visible output combined. This is initial
-headroom, not a measured optimum or a request for longer findings. The
-adversarial pass uses high reasoning; the other stages use low reasoning.
+The Luna design pass uses extra-high reasoning. Sol adversarial review and
+Luna verification of sensitive reviews use high reasoning. These stages each
+have a 25,000-token allowance per response for reasoning and visible output
+combined. This is initial headroom, not a measured optimum or a request for
+longer findings. Concurrency uses medium reasoning with 8,000 tokens. Other
+stages use low reasoning; ordinary verification retains 8,000 tokens.
 Debug output records the settings and actual usage. The same per-review
 spending ceiling applies.
 
@@ -80,7 +92,14 @@ The default per-review spending ceiling is USD 1.00. It is an allowance for
 complex reviews, not a target spend. Lightweight routing still skips Sol and
 irrelevant specialist stages. Before each API request the bot reserves a
 conservative input/output cost estimate, holding some allowance for verification
-and editing. Reported usage settles the reservation;
+based on its actual model, input, response limit and bounded evidence headroom.
+The pipeline refreshes that protection as candidates accumulate or risk changes.
+Tool-enabled requests also preserve room for a final response. When another
+inspection cannot fit, the model is asked to finish from available evidence if
+that final request fits. This is bounded headroom, not a guarantee of complete
+verification: evidence growth and shared monthly spending can still exhaust it.
+Editing uses remaining allowance and can fall back to the verifier's wording.
+Reported usage settles the reservation;
 missing usage or an ambiguous transport failure retains conservative estimated
 charges. These estimates depend on configured model prices and API token
 accounting, so they are not an invoice guarantee. Unknown model prices prevent
@@ -93,6 +112,16 @@ updates are coalesced, stale work stops between model requests, and completed
 review payloads are saved before publication. Publication retries reuse that
 payload. Transient failures have bounded retries; pending claims recover when
 the service restarts. The bot retains one editable comment per PR.
+
+The collapsed public debug section includes a finding-attribution table with
+the final title, discovering agents, verifier and editor. Merged candidates
+retain all their source agents; a finding first discovered during verification
+is credited to the verifier. Editing never earns discovery credit. Per-stage
+summaries show candidate dispositions, accepted findings found solely or jointly,
+cost estimates and incomplete usage. Joint credit is not evidence that each
+agent was necessary, and verifier acceptance is not a human quality label.
+Adversarial debug records its selected profiles without attributing findings
+to an individual profile within the shared call.
 
 The collapsed public debug section intentionally includes clipped preliminary
 responses during development, including findings the verifier rejected. The
@@ -176,9 +205,15 @@ be derived from `forgejoApi`.
   audit. This costs more and still respects the same allowance.
 - `routingMode = "full"`: request every audit without calling the router.
 - `modelsJson = null`: optional per-stage replacement for the model map.
-  The map must include router, independent, adversarial, state,
-  public_contract, tests, developer_notes, design, verifier and collator.
+  The map must include router, independent, adversarial, concurrency, state,
+  public_contract, tests, design, build, verifier and collator.
   Prices must also be supported by the bot's ledger.
+
+Custom prompt directories must include `consensus.md`, `wallet.md`, `p2p.md`,
+`concurrency.md` and `build.md`; remove `developer_notes` from custom model maps.
+Update custom prompt/model configurations together. Unsupported model names
+are rejected when configuration loads. The existing verifier model override
+can be used for controlled Sol comparisons while the default stays on Luna.
 
 Enabled routing is the default to control spend. Routing rules and contracts
 are covered by local tests; model quality and recall still need evaluation on
@@ -199,7 +234,8 @@ usage_complete is false when any reported count or response is missing.
 
 ## Frozen prompt and routing experiments
 
-The package installs `forgejo-review-bot-evaluate` with three subcommands.
+The package installs `forgejo-review-bot-evaluate` for capture, replay, spend
+inspection and offline summaries.
 Capture performs Forgejo/Git reads but makes no model calls:
 
 ```sh
@@ -235,3 +271,7 @@ Compare useful findings and missed known findings alongside cost, incomplete
 coverage and wall time. An empty review is not proof of a good route. Shadow
 routing is useful for a bounded comparison before changing sensitive path
 rules or removing a specialist.
+
+See [the evaluation guide](evaluation.md) for offline summaries and a human
+scorecard for comparing coverage and cost. Summaries use recorded attribution;
+they do not automatically decide whether a finding is correct or useful.

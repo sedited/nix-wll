@@ -264,6 +264,147 @@ class EvaluateTests(unittest.TestCase):
             self.assertEqual(evaluate.main(["spend", "--state-dir", str(state)]), 0)
         self.assertIn("estimated_total_usd", json.loads(output.getvalue()))
 
+    def write_run(self, name, artifact):
+        runs = self.root / "runs"
+        runs.mkdir(exist_ok=True)
+        path = runs / name
+        evaluate.write_private_json(path, artifact)
+        return path
+
+    def test_summarize_runs_groups_offline_costs_and_outcomes(self):
+        first = self.write_run("run-first.json", {
+            "status": "completed",
+            "effective_config_sha256": "a" * 64,
+            "started_at": "2026-09-30T00:00:00+00:00",
+            "finished_at": "2026-09-30T00:00:10+00:00",
+            "expected_findings": ["human-held label"],
+            "budget": {"estimated_total_usd": 0.12},
+            "raw_debug": {
+                "coverage": {"status": "partial"},
+                "candidate_sources": {
+                    "state:1": "state",
+                    "state:2": "state",
+                    "state:3": "state",
+                    "state:4": "state",
+                    "tests:1": "tests",
+                    "tests:2": "tests",
+                },
+                "decisions": [
+                    {"disposition": "publish",
+                     "candidate_ids": ["state:1", "tests:1"]},
+                    {"disposition": "publish",
+                     "candidate_ids": ["state:3"]},
+                    {"disposition": "drop",
+                     "candidate_ids": ["state:2"]},
+                    {"disposition": "unresolved",
+                     "candidate_ids": ["tests:2"]},
+                ],
+                "finding_attribution": [
+                    {"finding_id": "finding-1",
+                     "candidate_ids": ["state:1", "tests:1"],
+                     "raised_by": ["state", "tests"]},
+                    {"finding_id": "finding-2",
+                     "candidate_ids": ["state:3"],
+                     "raised_by": ["state"]},
+                ],
+                "stages": {
+                    "state": {"model": "gpt-6-luna", "status": "completed",
+                              "turns": [], "tools": []},
+                    "tests": {"model": "gpt-6-luna", "status": "completed",
+                              "turns": [], "tools": []},
+                    "verifier": {
+                        "model": "gpt-6-luna",
+                        "status": "completed",
+                        "turns": [{
+                            "model": "gpt-6-luna",
+                            "request_bytes": 100,
+                            "input_tokens": 10,
+                            "cached_tokens": 0,
+                            "cache_write_tokens": 0,
+                            "output_tokens": 20,
+                            "elapsed_seconds": 1.5,
+                        }],
+                    },
+                },
+            },
+        })
+        self.write_run("run-second.json", {
+            "status": "failed",
+            "effective_config_sha256": "a" * 64,
+            "started_at": "2026-09-30T00:00:00+00:00",
+            "finished_at": "2026-09-30T00:00:05+00:00",
+            "error": {"type": "RuntimeError", "message": "model failed"},
+            "budget": {"estimated_total_usd": 0.20},
+            "raw_debug": {
+                "stages": {
+                    "design": {
+                        "model": "gpt-unknown",
+                        "status": "budget_exhausted",
+                        "incomplete_reason": "max_output_tokens",
+                        "turns": [{
+                            "model": "gpt-unknown",
+                            "request_bytes": 100,
+                            "input_tokens": 5,
+                            "cached_tokens": 0,
+                            "cache_write_tokens": 0,
+                            "output_tokens": 7,
+                            "elapsed_seconds": 2.0,
+                            "incomplete_reason": "max_output_tokens",
+                        }],
+                    },
+                },
+            },
+        })
+        self.write_run("run-third.json", {
+            "status": "completed",
+            "effective_config_sha256": "b" * 64,
+            "raw_debug": {"stages": {}},
+        })
+
+        summary = evaluate.summarize_runs([first.parent])
+        group = summary["groups"]["a" * 64]
+        self.assertEqual(group["runs"], 2)
+        self.assertEqual(group["completed"], 1)
+        self.assertEqual(group["failed"], 1)
+        self.assertEqual(group["partial_coverage"], 1)
+        self.assertEqual(group["budget_exhausted"], 1)
+        self.assertEqual(group["labels_present"], 1)
+        self.assertEqual(group["decision_counts"],
+                         {"published": 2, "dropped": 1, "unresolved": 1})
+        self.assertEqual(group["accepted_findings"], 2)
+        self.assertEqual(group["cost_usd"]["total"], 0.000011)
+        self.assertEqual(group["unknown_usage_runs"], 1)
+        self.assertEqual(group["unknown_usage_turns"], 1)
+        self.assertEqual(group["wall_seconds"]["total"], 15.0)
+        self.assertEqual(group["stage_metrics"]["design"]["status_counts"],
+                         {"budget_exhausted": 1})
+        self.assertEqual(
+            group["stage_metrics"]["design"]["max_output_token_incomplete_turns"], 1)
+        self.assertEqual(
+            group["stage_metrics"]["verifier"]["known_cost_usd"], 0.000011)
+        self.assertEqual(group["stage_metrics"]["state"]["published_candidates"], 2)
+        self.assertEqual(group["stage_metrics"]["state"]["dropped_candidates"], 1)
+        self.assertEqual(group["stage_metrics"]["state"]["undisposed_candidates"], 1)
+        self.assertEqual(group["stage_metrics"]["state"]["sole_accepted_findings"], 1)
+        self.assertEqual(group["stage_metrics"]["state"]["shared_accepted_findings"], 1)
+        self.assertEqual(group["stage_metrics"]["tests"]["published_candidates"], 1)
+        self.assertEqual(group["stage_metrics"]["tests"]["unresolved_candidates"], 1)
+        self.assertEqual(group["stage_metrics"]["tests"]["shared_accepted_findings"], 1)
+        self.assertIn("does not match labels", summary["labels_note"])
+
+    def test_summarize_cli_reads_artifacts_without_credentials(self):
+        path = self.write_run("run-cli.json", {
+            "status": "completed",
+            "effective_config_sha256": "c" * 64,
+            "raw_debug": {"stages": {}},
+        })
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(evaluate.main(["summarize", str(path)]), 0)
+        summary = json.loads(output.getvalue())
+        self.assertEqual(summary["run_artifacts"], 1)
+        self.assertEqual(summary["groups"]["c" * 64]["runs"], 1)
+
     def test_capture_and_run_cli_keep_credentials_separate(self):
         token_file = self.root / "forgejo-token"
         key_file = self.root / "openai-key"

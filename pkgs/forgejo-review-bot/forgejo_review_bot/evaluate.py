@@ -1,18 +1,20 @@
 """Capture Forgejo PR cases and replay them from frozen local inputs."""
 
 import argparse
+import math
 import hashlib
 import json
 import os
 import re
 import subprocess
 import uuid
+from collections import Counter, defaultdict
 from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import config, forgejo, pipeline, repository, spend
+from . import config, forgejo, pipeline, repository, spend, trace
 
 
 SCHEMA_VERSION = 1
@@ -295,6 +297,243 @@ def run_case(manifest_path, api_key, output_dir, ledger, routing_mode="enabled",
     return path
 
 
+def _run_paths(paths):
+    for path in paths:
+        if path.is_dir():
+            yield from sorted(path.glob("run-*.json"))
+        else:
+            yield path
+
+
+def _iso_seconds(start, finish):
+    if not isinstance(start, str) or not isinstance(finish, str):
+        return None
+    try:
+        started = datetime.fromisoformat(start.replace("Z", "+00:00"))
+        finished = datetime.fromisoformat(finish.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return max(0.0, round((finished - started).total_seconds(), 2))
+
+
+def _p95(values):
+    values = sorted(values)
+    if not values:
+        return None
+    return values[math.ceil(len(values) * 0.95) - 1]
+
+
+def _mean(values):
+    return None if not values else sum(values) / len(values)
+
+
+def _series(values):
+    return {"total": _rounded(sum(values)),
+            "mean": _rounded(_mean(values)),
+            "p95": _rounded(_p95(values))}
+
+
+def _rounded(value):
+    return None if value is None else round(value, 6)
+
+
+def _run_has_budget_exhaustion(artifact):
+    error = artifact.get("error") or {}
+    if error.get("type") == "BudgetExceeded":
+        return True
+    stages = ((artifact.get("raw_debug") or {}).get("stages") or {})
+    return any(stage.get("status") == "budget_exhausted"
+               for stage in stages.values() if isinstance(stage, dict))
+
+
+def _run_has_partial_coverage(artifact):
+    debug = artifact.get("raw_debug") or {}
+    coverage = debug.get("coverage") or {}
+    if coverage.get("status") == "partial":
+        return True
+    stages = debug.get("stages") or {}
+    return any((stage.get("coverage") or {}).get("status") == "partial"
+               for stage in stages.values() if isinstance(stage, dict))
+
+
+def _new_summary_group():
+    return {
+        "runs": 0,
+        "completed": 0,
+        "failed": 0,
+        "partial_coverage": 0,
+        "budget_exhausted": 0,
+        "labels_present": 0,
+        "decision_counts": Counter(),
+        "accepted_findings": 0,
+        "known_costs": [],
+        "wall_seconds": [],
+        "unknown_usage_runs": 0,
+        "unknown_usage_turns": 0,
+        "incomplete_usage_runs": 0,
+        "incomplete_usage_turns": 0,
+        "max_output_token_incomplete_turns": 0,
+        "stage_metrics": defaultdict(lambda: {
+            "runs": 0,
+            "status_counts": Counter(),
+            "turns": 0,
+            "tool_calls": 0,
+            "known_cost_usd": 0.0,
+            "unknown_usage_turns": 0,
+            "incomplete_usage_turns": 0,
+            "max_output_token_incomplete_turns": 0,
+            "published_candidates": 0,
+            "dropped_candidates": 0,
+            "unresolved_candidates": 0,
+            "undisposed_candidates": 0,
+            "sole_accepted_findings": 0,
+            "shared_accepted_findings": 0,
+        }),
+    }
+
+
+def _add_stage_metrics(group, debug):
+    stages = debug.get("stages") or {}
+    traced = trace.stage_metrics(debug)
+    for name, record in traced.items():
+        metrics = group["stage_metrics"][name]
+        metrics["turns"] += record["calls"]
+        metrics["tool_calls"] += record["tool_calls"]
+        metrics["known_cost_usd"] += record["known_estimated_cost_usd"]
+        metrics["unknown_usage_turns"] += record["unknown_usage_count"]
+        metrics["incomplete_usage_turns"] += record["incomplete_usage_count"]
+        candidate_counts = record.get("candidate_counts") or {}
+        metrics["published_candidates"] += candidate_counts.get("publish", 0)
+        metrics["dropped_candidates"] += candidate_counts.get("drop", 0)
+        metrics["unresolved_candidates"] += candidate_counts.get("unresolved", 0)
+        metrics["undisposed_candidates"] += candidate_counts.get("undisposed", 0)
+        metrics["sole_accepted_findings"] += record["sole_source_findings"]
+        metrics["shared_accepted_findings"] += record["shared_findings"]
+    for name, stage in stages.items():
+        if not isinstance(stage, dict):
+            continue
+        metrics = group["stage_metrics"][name]
+        metrics["runs"] += 1
+        metrics["status_counts"][stage.get("status", "unknown")] += 1
+        turn_max_output = 0
+        for turn in stage.get("turns", []):
+            if turn.get("incomplete_reason") == "max_output_tokens":
+                turn_max_output += 1
+        if not turn_max_output and stage.get("incomplete_reason") == "max_output_tokens":
+            turn_max_output = 1
+        metrics["max_output_token_incomplete_turns"] += turn_max_output
+        group["max_output_token_incomplete_turns"] += turn_max_output
+
+
+def _finalize_group(group):
+    runs = group["runs"]
+    completed = group["completed"]
+    stage_metrics = {}
+    for name, metrics in sorted(group["stage_metrics"].items()):
+        stage_runs = metrics["runs"]
+        stage_metrics[name] = {
+            "runs": stage_runs,
+            "status_counts": dict(sorted(metrics["status_counts"].items())),
+            "turns": metrics["turns"],
+            "tool_calls": metrics["tool_calls"],
+            "mean_turns_per_run": _rounded(metrics["turns"] / stage_runs
+                                           if stage_runs else None),
+            "known_cost_usd": _rounded(metrics["known_cost_usd"]),
+            "unknown_usage_turns": metrics["unknown_usage_turns"],
+            "incomplete_usage_turns": metrics["incomplete_usage_turns"],
+            "max_output_token_incomplete_turns": metrics["max_output_token_incomplete_turns"],
+            "published_candidates": metrics["published_candidates"],
+            "dropped_candidates": metrics["dropped_candidates"],
+            "unresolved_candidates": metrics["unresolved_candidates"],
+            "undisposed_candidates": metrics["undisposed_candidates"],
+            "accepted_findings": (
+                metrics["sole_accepted_findings"]
+                + metrics["shared_accepted_findings"]),
+            "sole_accepted_findings": metrics["sole_accepted_findings"],
+            "shared_accepted_findings": metrics["shared_accepted_findings"],
+        }
+    return {
+        "runs": runs,
+        "completed": completed,
+        "failed": group["failed"],
+        "partial_coverage": group["partial_coverage"],
+        "budget_exhausted": group["budget_exhausted"],
+        "labels_present": group["labels_present"],
+        "unknown_usage_runs": group["unknown_usage_runs"],
+        "unknown_usage_turns": group["unknown_usage_turns"],
+        "incomplete_usage_runs": group["incomplete_usage_runs"],
+        "incomplete_usage_turns": group["incomplete_usage_turns"],
+        "max_output_token_incomplete_turns": group["max_output_token_incomplete_turns"],
+        "decision_counts": {
+            "published": group["decision_counts"]["publish"],
+            "dropped": group["decision_counts"]["drop"],
+            "unresolved": group["decision_counts"]["unresolved"],
+        },
+        "accepted_findings": group["accepted_findings"],
+        "cost_usd": {
+            **_series(group["known_costs"]),
+            "known_per_accepted_finding": _rounded(
+                sum(group["known_costs"]) / group["accepted_findings"]
+                if group["accepted_findings"] else None),
+        },
+        "wall_seconds": _series(group["wall_seconds"]),
+        "stage_metrics": stage_metrics,
+    }
+
+
+def summarize_runs(paths):
+    groups = defaultdict(_new_summary_group)
+    artifacts = 0
+    for path in _run_paths(paths):
+        artifact = json.loads(path.read_text(encoding="utf-8"))
+        artifacts += 1
+        key = artifact.get("effective_config_sha256") or "unknown"
+        group = groups[key]
+        group["runs"] += 1
+        if artifact.get("status") == "completed":
+            group["completed"] += 1
+        else:
+            group["failed"] += 1
+        if _run_has_partial_coverage(artifact):
+            group["partial_coverage"] += 1
+        if _run_has_budget_exhaustion(artifact):
+            group["budget_exhausted"] += 1
+        if "expected_findings" in artifact:
+            group["labels_present"] += 1
+        debug = artifact.get("raw_debug") or {}
+        metrics = trace.review_metrics(debug, None)
+        run_cost = metrics["estimated_cost_usd"]
+        group["known_costs"].append(run_cost)
+        if metrics["unknown_usage_count"]:
+            group["unknown_usage_runs"] += 1
+        group["unknown_usage_turns"] += metrics["unknown_usage_count"]
+        if metrics["incomplete_usage_count"]:
+            group["incomplete_usage_runs"] += 1
+        group["incomplete_usage_turns"] += metrics["incomplete_usage_count"]
+        wall = _iso_seconds(artifact.get("started_at"), artifact.get("finished_at"))
+        if wall is not None:
+            group["wall_seconds"].append(wall)
+        decisions = [decision for decision in debug.get("decisions", [])
+                     if isinstance(decision, dict)]
+        group["decision_counts"].update(
+            decision.get("disposition", "unknown") for decision in decisions)
+        group["accepted_findings"] += sum(
+            decision.get("disposition") == "publish" for decision in decisions)
+        _add_stage_metrics(group, debug)
+    return {
+        "schema_version": 1,
+        "run_artifacts": artifacts,
+        "groups": {key: _finalize_group(group)
+                   for key, group in sorted(groups.items())},
+        "pricing_note": ("Known costs are estimated from saved token usage and "
+                         "configured rates. Unknown usage is excluded from "
+                         "known cost totals and counted separately."),
+        "labels_note": ("Expected labels are counted only as present. This "
+                        "summary does not match labels to findings or establish "
+                        "recall."),
+    }
+
+
 def add_config_args(parser):
     parser.add_argument("--origin", required=True)
     parser.add_argument("--repository", required=True)
@@ -333,6 +572,10 @@ def main(argv=None):
 
     summary = commands.add_parser("spend", help="show current month spend")
     summary.add_argument("--state-dir", type=Path, required=True)
+
+    summarize = commands.add_parser("summarize",
+                                    help="summarize saved run JSON artifacts")
+    summarize.add_argument("runs", type=Path, nargs="+")
     args = parser.parse_args(argv)
 
     if args.command == "capture":
@@ -351,6 +594,9 @@ def main(argv=None):
         if not path.exists():
             parser.error(f"No spend ledger at {path}")
         print(json.dumps(spend.Ledger(path).summary(), sort_keys=True))
+        return 0
+    if args.command == "summarize":
+        print(json.dumps(summarize_runs(args.runs), sort_keys=True))
         return 0
 
     api_key = read_secret(args.openai_key_file, "OpenAI key")
