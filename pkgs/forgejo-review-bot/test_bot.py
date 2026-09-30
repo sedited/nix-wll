@@ -100,6 +100,72 @@ class BotTests(unittest.TestCase):
         self.assertIn("PR description:\nWhy this change is needed", result[2])
         self.assertIn(("diff", "--no-ext-diff", "--binary", f"{merge_base}..{head}"), calls)
 
+    def test_concurrent_review_refs_preserve_pinned_snapshots(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            origin = root / "origin.git"
+            work = root / "work"
+            checkout = root / "checkout"
+            repository.git(root, "init", "--bare", str(origin))
+            repository.git(root, "init", str(work))
+            repository.git(work, "config", "user.name", "Test")
+            repository.git(work, "config", "user.email", "test@example.com")
+            repository.git(work, "remote", "add", "origin", str(origin))
+            path = work / "code.cpp"
+            path.write_text("base behavior\n")
+            repository.git(work, "add", "code.cpp")
+            repository.git(work, "commit", "-qm", "Base")
+            base = repository.git(work, "rev-parse", "HEAD").strip()
+            repository.git(work, "push", "origin", "HEAD:refs/heads/master")
+
+            path.write_text("first PR behavior\n")
+            repository.git(work, "commit", "-qam", "First PR")
+            first_head = repository.git(work, "rev-parse", "HEAD").strip()
+            repository.git(work, "push", "origin", "HEAD:refs/pull/1/head")
+            repository.git(work, "reset", "--hard", base)
+            path.write_text("second PR behavior\n")
+            repository.git(work, "commit", "-qam", "Second PR")
+            second_head = repository.git(work, "rev-parse", "HEAD").strip()
+            repository.git(work, "push", "origin", "HEAD:refs/pull/2/head")
+
+            bot_config = config.BotConfig(str(origin), "example/repo",
+                "https://git.example.org/api/v1/repos/example/repo")
+            first_prefix = "refs/review-bot/jobs/1-1"
+            second_prefix = "refs/review-bot/jobs/2-1"
+            first = repository.collect_review(checkout, 1, "master", first_head,
+                "First", "First PR", bot_config, ref_prefix=first_prefix)
+            self.assertIsNone(first[3])
+            first_snapshot = repository.snapshot_repository(checkout, first[0], first[1])
+            second = repository.collect_review(checkout, 2, "master", second_head,
+                "Second", "Second PR", bot_config, ref_prefix=second_prefix)
+            self.assertIsNone(second[3])
+            second_snapshot = repository.snapshot_repository(checkout, second[0], second[1])
+            repository.git(checkout, "update-ref", "refs/review-bot/head", base)
+
+            self.assertIn("first PR behavior", repository.read_file(checkout,
+                first_snapshot.head_files, "code.cpp", 1))
+            self.assertIn("+first PR behavior", repository.read_diff(checkout,
+                first_snapshot.changed_paths, first_snapshot.merge_base,
+                first_snapshot.head_sha, "code.cpp", 1))
+            self.assertIn("second PR behavior", repository.read_file(checkout,
+                second_snapshot.head_files, "code.cpp", 1))
+            repository.git(checkout, "gc", "--prune=now")
+            self.assertIn("first PR behavior", repository.read_file(checkout,
+                first_snapshot.head_files, "code.cpp", 1))
+            repository.git(checkout, "update-ref", "refs/review-cases/example/head", first_head)
+
+            repository.release_review_refs(checkout, first_prefix)
+            self.assertEqual(repository.git(checkout, "for-each-ref", "--format=%(refname)",
+                first_prefix), "")
+            self.assertEqual(repository.git(checkout, "rev-parse", f"{second_prefix}/head").strip(),
+                second_head)
+            self.assertEqual(repository.git(checkout, "rev-parse", f"{second_prefix}/base").strip(),
+                base)
+            self.assertEqual(repository.git(checkout, "rev-parse", "refs/review-bot/head").strip(),
+                base)
+            self.assertEqual(repository.git(checkout, "rev-parse",
+                "refs/review-cases/example/head").strip(), first_head)
+
     def test_large_patch_offers_per_file_diff_instead_of_skipping(self):
         head = "a" * 40
 

@@ -27,13 +27,16 @@ def prepare_checkout(checkout, bot_config):
     if git(checkout, "remote", "get-url", "origin").strip() != bot_config.origin:
         raise ValueError("checkout origin does not match configured repository")
 
-def collect_review(checkout, number, base_ref, expected_head, title, description, bot_config):
+def collect_review(checkout, number, base_ref, expected_head, title, description, bot_config,
+                   *, ref_prefix="refs/review-bot"):
     prepare_checkout(checkout, bot_config)
+    base_fetch_ref = f"{ref_prefix}/base"
+    head_fetch_ref = f"{ref_prefix}/head"
     git(checkout, "fetch", "--no-tags", "--filter=blob:none", "origin",
-        f"+refs/heads/{base_ref}:refs/review-bot/base",
-        f"+refs/pull/{number}/head:refs/review-bot/head")
-    actual_head = git(checkout, "rev-parse", "refs/review-bot/head").strip()
-    base_sha = git(checkout, "rev-parse", "refs/review-bot/base").strip()
+        f"+refs/heads/{base_ref}:{base_fetch_ref}",
+        f"+refs/pull/{number}/head:{head_fetch_ref}")
+    actual_head = git(checkout, "rev-parse", head_fetch_ref).strip()
+    base_sha = git(checkout, "rev-parse", base_fetch_ref).strip()
     if actual_head != expected_head:
         return base_sha, actual_head, None, "PR head changed before review"
     merge_base = git(checkout, "merge-base", base_sha, actual_head).strip()
@@ -51,6 +54,18 @@ def collect_review(checkout, number, base_ref, expected_head, title, description
         if len(review.encode()) > MAX_REVIEW_BYTES:
             return base_sha, actual_head, None, f"Review input exceeds {MAX_REVIEW_BYTES} bytes"
     return base_sha, actual_head, review, None
+
+def release_review_refs(checkout, ref_prefix):
+    """Delete the base and head fetch refs for one finished review attempt."""
+    base_ref = f"{ref_prefix}/base"
+    head_ref = f"{ref_prefix}/head"
+    git(checkout, "check-ref-format", base_ref)
+    git(checkout, "check-ref-format", head_ref)
+    subprocess.run(
+        ["git", "-C", str(checkout), "update-ref", "--stdin"],
+        input=f"start\ndelete {base_ref}\ndelete {head_ref}\nprepare\ncommit\n",
+        check=True, capture_output=True, text=True, timeout=180,
+    )
 
 def tracked_files(checkout, ref="HEAD"):
     """Map tracked regular paths at a Git object to blob IDs."""
