@@ -109,6 +109,24 @@ class JobStoreTests(unittest.TestCase):
         self.assertEqual(self.row(old)["status"], "superseded")
         self.assertEqual(restarted.claim()["head"], "b" * 40)
 
+    def test_recover_releases_multiple_running_claims(self):
+        self.enqueue()
+        self.store.enqueue(43, "master", "b" * 40, "opened")
+        first = self.store.claim()
+        second = self.store.claim()
+        self.assertEqual({first["number"], second["number"]}, {42, 43})
+        result = {"content": "Saved review"}
+        self.assertTrue(self.store.save_result(first, result))
+
+        restarted = jobs.JobStore(self.path)
+        self.assertEqual(restarted.recover(), 2)
+        recovered = [restarted.claim(), restarted.claim()]
+        self.assertEqual({job["number"] for job in recovered}, {42, 43})
+        saved = next(job for job in recovered if job["number"] == 42)
+        self.assertEqual(saved["review_result"], result)
+        for old in (first, second):
+            self.assertFalse(restarted.complete(old))
+
     def test_saved_review_result_survives_retry_and_restart(self):
         self.enqueue()
         first = self.store.claim()
@@ -149,12 +167,47 @@ class JobStoreTests(unittest.TestCase):
                           self.row(third)["error"]),
                          ("failed", 3, "exhausted"))
 
-    def test_only_one_thread_can_claim(self):
+    def test_simultaneous_claims_get_distinct_jobs_once(self):
         self.enqueue()
         self.store.enqueue(43, "master", "b" * 40, "opened")
         with ThreadPoolExecutor(max_workers=8) as pool:
             claims = list(pool.map(lambda _: self.store.claim(), range(8)))
-        self.assertEqual(sum(claim is not None for claim in claims), 1)
+        self.assertEqual({claim["number"] for claim in claims if claim},
+                         {42, 43})
+        self.assertEqual(sum(claim is not None for claim in claims), 2)
+
+    def test_newer_head_waits_while_another_pr_can_be_claimed(self):
+        self.enqueue()
+        first = self.store.claim()
+        self.enqueue("b" * 40)
+        self.store.enqueue(43, "master", "c" * 40, "opened")
+
+        second = self.store.claim()
+        self.assertEqual(second["number"], 43)
+        self.assertIsNone(self.store.claim())
+        self.assertTrue(self.store.supersede(first))
+        self.assertEqual(self.store.claim()["head"], "b" * 40)
+
+    def test_existing_global_index_is_replaced_without_losing_work(self):
+        self.enqueue()
+        running = self.store.claim()
+        result = {"content": "Saved review"}
+        self.assertTrue(self.store.save_result(running, result))
+        self.store.enqueue(43, "master", "b" * 40, "opened")
+        with closing(sqlite3.connect(self.path)) as db:
+            db.execute("DROP INDEX jobs_one_running_per_pr")
+            db.execute("CREATE UNIQUE INDEX jobs_one_running "
+                       "ON jobs(status) WHERE status = 'running'")
+            db.commit()
+
+        reopened = jobs.JobStore(self.path)
+        self.assertEqual(reopened.claim()["number"], 43)
+        self.assertEqual(self.row(running)["review_result"],
+                         '{"content": "Saved review"}')
+        with closing(sqlite3.connect(self.path)) as db:
+            names = {row[1] for row in db.execute("PRAGMA index_list(jobs)")}
+        self.assertIn("jobs_one_running_per_pr", names)
+        self.assertNotIn("jobs_one_running", names)
 
 
 if __name__ == "__main__":

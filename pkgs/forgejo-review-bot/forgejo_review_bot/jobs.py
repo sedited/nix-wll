@@ -39,9 +39,10 @@ class JobStore:
                 CREATE UNIQUE INDEX IF NOT EXISTS jobs_one_pending_per_pr
                     ON jobs(number) WHERE status = 'pending'
             """)
+            db.execute("DROP INDEX IF EXISTS jobs_one_running")
             db.execute("""
-                CREATE UNIQUE INDEX IF NOT EXISTS jobs_one_running
-                    ON jobs(status) WHERE status = 'running'
+                CREATE UNIQUE INDEX IF NOT EXISTS jobs_one_running_per_pr
+                    ON jobs(number) WHERE status = 'running'
             """)
 
     @contextmanager
@@ -136,15 +137,19 @@ class JobStore:
             return len(running)
 
     def claim(self):
-        """Claim the next due job, or return None while another job runs."""
+        """Claim the next due job whose PR has no running job."""
         with self._connection(write=True) as db:
-            if db.execute("SELECT 1 FROM jobs WHERE status = 'running'").fetchone():
-                return None
             row = db.execute("""
-                SELECT * FROM jobs
-                WHERE status = 'pending'
-                   OR (status = 'retry' AND next_attempt <= ?)
-                ORDER BY id LIMIT 1
+                SELECT * FROM jobs AS candidate
+                WHERE (candidate.status = 'pending'
+                    OR (candidate.status = 'retry'
+                        AND candidate.next_attempt <= ?))
+                    AND NOT EXISTS (
+                        SELECT 1 FROM jobs AS running
+                        WHERE running.number = candidate.number
+                            AND running.status = 'running'
+                    )
+                ORDER BY candidate.id LIMIT 1
             """, (time.time(),)).fetchone()
             if row is None:
                 return None
