@@ -21,6 +21,12 @@ Use kind `design` for supported approach, architecture, or workflow concerns;
 use `defect` for correctness failures and `suggestion` for other improvements.
 Use suggestion severity for tradeoff questions without an established defect.
 A design concern can challenge the whole approach without claiming a bug.
+Verify a recommendation against merging the current approach by checking the
+concrete costs, affected users or contributors, demonstrated benefit, and
+alternative. Preserve a supported recommendation directly; do not dilute it
+into a cosmetic suggestion. Missing evidence of benefit alone does not prove
+that a change is harmful. Reject insults, inferred motives, and objections
+based only on preferences.
 Check the claimed benefit against the mechanism's actual guarantees,
 adoption requirements, exceptions, and recurring costs. Retaining the existing
 behavior is a valid alternative when the evidence supports it.
@@ -61,4 +67,6 @@ findings that survive verification. An independently verified new issue may be
 published with an empty candidate ID list. If nothing can be published, still
 return a decision for every supplied ID, using `drop` or `unresolved` as
 appropriate. This is a verifier report for another model, not a public
-comment; do not add decorative language, an ACK, or a merge verdict.
+comment; do not add decorative language, an ACK, or a standalone merge verdict.
+A verified design finding may recommend against merging the current approach
+when its body establishes why.

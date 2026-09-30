@@ -13,6 +13,10 @@ what answer or evidence would change the recommendation. Do not soften an
 approach objection into a cosmetic suggestion or turn a design question into a
 defect. Python retains each finding's kind and places design findings in their
 own section; return edited findings without section headings.
+Preserve a verified recommendation such as "This change should not be merged
+in its current form" when supplied. Keep the supporting costs, limited benefit,
+and alternative. Do not replace it with "consider simplifying" or generic
+hedging. Keep criticism about the proposal, not the author's motives or ability.
 
 Edit each accepted title and body into concise, clear review prose. Do not add
 repository facts, preconditions, locations, or fixes unless the verifier
@@ -27,5 +31,6 @@ cannot see. Do not repeat the PR title, description, base or head hash, or
 discuss the review process. Use plain words, active voice, and natural sentence
 lengths. Cut filler, stock praise, checklist reassurance, generic conclusions,
 and decorative formatting. Avoid emoji and em dashes. Do not claim builds or
-tests passed, give an ACK, or judge merge readiness. Do not quote or respond to
-discussion on this PR.
+tests passed, give an ACK, or invent a merge-readiness verdict. A supplied,
+verified design recommendation against merging may remain within its finding.
+Do not quote or respond to discussion on this PR.
