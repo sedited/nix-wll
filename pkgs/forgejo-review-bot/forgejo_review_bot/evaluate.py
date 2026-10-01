@@ -372,6 +372,9 @@ def _new_summary_group():
         "labels_present": 0,
         "decision_counts": Counter(),
         "accepted_findings": 0,
+        "archaeology_research_completed": 0,
+        "published_conceptual_concerns": 0,
+        "conceptual_concern_status_counts": Counter(),
         "known_costs": [],
         "wall_seconds": [],
         "unknown_usage_runs": 0,
@@ -383,6 +386,8 @@ def _new_summary_group():
             "runs": 0,
             "status_counts": Counter(),
             "turns": 0,
+            "concept_stage": False,
+            "conceptual_concerns": 0,
             "tool_calls": 0,
             "known_cost_usd": 0.0,
             "unknown_usage_turns": 0,
@@ -403,6 +408,9 @@ def _add_stage_metrics(group, debug):
     traced = trace.stage_metrics(debug)
     for name, record in traced.items():
         metrics = group["stage_metrics"][name]
+        metrics["concept_stage"] = metrics["concept_stage"] or bool(
+            record.get("concept_stage"))
+        metrics["conceptual_concerns"] += record.get("conceptual_concerns", 0)
         metrics["turns"] += record["calls"]
         metrics["tool_calls"] += record["tool_calls"]
         metrics["known_cost_usd"] += record["known_estimated_cost_usd"]
@@ -440,6 +448,8 @@ def _finalize_group(group):
         stage_metrics[name] = {
             "runs": stage_runs,
             "status_counts": dict(sorted(metrics["status_counts"].items())),
+            "concept_stage": metrics["concept_stage"],
+            "conceptual_concerns": metrics["conceptual_concerns"],
             "turns": metrics["turns"],
             "tool_calls": metrics["tool_calls"],
             "mean_turns_per_run": _rounded(metrics["turns"] / stage_runs
@@ -476,6 +486,10 @@ def _finalize_group(group):
             "unresolved": group["decision_counts"]["unresolved"],
         },
         "accepted_findings": group["accepted_findings"],
+        "archaeology_research_completed": group["archaeology_research_completed"],
+        "published_conceptual_concerns": group["published_conceptual_concerns"],
+        "conceptual_concern_status_counts": dict(sorted(
+            group["conceptual_concern_status_counts"].items())),
         "cost_usd": {
             **_series(group["known_costs"]),
             "known_per_accepted_finding": _rounded(
@@ -525,6 +539,16 @@ def summarize_runs(paths):
             decision.get("disposition", "unknown") for decision in decisions)
         group["accepted_findings"] += sum(
             decision.get("disposition") == "publish" for decision in decisions)
+        assessment = trace.concept_assessment(debug)
+        if trace.published_concept_assessment(debug) is not None:
+            group["published_conceptual_concerns"] += 1
+        if assessment:
+            group["conceptual_concern_status_counts"][assessment.get("status", "unknown")] += 1
+        if any(isinstance(stage, dict)
+               and name == "archaeologist"
+               and stage.get("status") == "completed"
+               for name, stage in (debug.get("stages") or {}).items()):
+            group["archaeology_research_completed"] += 1
         _add_stage_metrics(group, debug)
     return {
         "schema_version": 1,

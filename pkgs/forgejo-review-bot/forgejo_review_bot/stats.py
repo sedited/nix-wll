@@ -62,6 +62,12 @@ def collect_stats(state_dir: Path, report_dir: Path) -> dict:
         "published_findings": 0,
         "coverage": {"complete": 0, "partial": 0, "unknown": 0},
         "attribution_coverage": {"complete": 0, "missing": 0},
+        "archaeology": {
+            "research_completed": 0,
+            "saved_concerns": 0,
+            "published_concerns": 0,
+            "assessment_status_counts": {},
+        },
         "finding_kinds": {},
         "finding_severities": {},
     }
@@ -73,6 +79,8 @@ def collect_stats(state_dir: Path, report_dir: Path) -> dict:
     cost_missing_ledger = 0
     tool_values = []
     second_values = []
+    concept_citation_values = []
+    concept_alternative_values = []
     paired = _new_paired_summary()
     requests_by_review = defaultdict(list)
     configured_stage_models = {}
@@ -102,6 +110,8 @@ def collect_stats(state_dir: Path, report_dir: Path) -> dict:
         observed_ledger_totals = _observed_review_totals(
             ledger_totals, bool(review_requests))
         findings = _published_findings(debug)
+        concept = _concept_summary(debug)
+        research_completed = _archaeology_research_completed(debug)
         coverage = _coverage_status(debug)
         routing = _routing_summary(debug)
         metrics = _saved_review_metrics(debug)
@@ -113,6 +123,8 @@ def collect_stats(state_dir: Path, report_dir: Path) -> dict:
             overview["coverage"][coverage] += 1
             overview["attribution_coverage"][
                 "complete" if _has_attribution(debug, findings) else "missing"] += 1
+            _add_archaeology_counts(overview, research_completed, concept,
+                                    row["status"] == "complete")
             if row["status"] == "complete":
                 overview["published_reviews"] += 1
                 overview["published_findings"] += len(findings)
@@ -128,6 +140,9 @@ def collect_stats(state_dir: Path, report_dir: Path) -> dict:
                 cost_missing_ledger += 1
             tool_values.append(metrics["tool_calls"])
             second_values.append(metrics["model_seconds"])
+            if concept["published_concern"]:
+                concept_citation_values.append(concept["citation_count"])
+                concept_alternative_values.append(concept["alternative_count"])
 
         record = {
             "job_id": row["id"],
@@ -144,6 +159,7 @@ def collect_stats(state_dir: Path, report_dir: Path) -> dict:
                 "saved": len(findings),
                 "published": len(findings) if row["status"] == "complete" else 0,
             },
+            "archaeology": {"research_completed": research_completed, **concept},
             "ledger": observed_ledger_totals,
             "tokens": observed_ledger_totals["tokens"],
             "tool_calls": metrics["tool_calls"],
@@ -176,6 +192,10 @@ def collect_stats(state_dir: Path, report_dir: Path) -> dict:
             "saved_review_cost_missing_ledger_count": cost_missing_ledger,
             "saved_review_tools": _distribution(tool_values),
             "saved_review_model_seconds": _distribution(second_values),
+            "saved_review_conceptual_concern_citations": _distribution(
+                concept_citation_values),
+            "saved_review_conceptual_concern_alternatives": _distribution(
+                concept_alternative_values),
         },
         "paired_sol_glm": paired,
         "recent_reviews": sorted(review_records, key=lambda item: item["job_id"],
@@ -389,6 +409,53 @@ def _has_attribution(debug, findings):
     return bool(trace.finding_attribution(debug))
 
 
+def _concept_summary(debug):
+    concept = trace.concept_assessment(debug)
+    if not concept:
+        return {"published_concern": False}
+    verification = concept.get("verification") if isinstance(concept.get("verification"), dict) else {}
+    assessment = verification.get("assessment") if isinstance(
+        verification.get("assessment"), dict) else None
+    alternatives = assessment.get("alternatives") if isinstance(assessment, dict) else []
+    citations = list(assessment.get("citations") if isinstance(assessment, dict) else [])
+    for alternative in alternatives if isinstance(alternatives, list) else []:
+        if isinstance(alternative, dict) and isinstance(alternative.get("citations"), list):
+            citations.extend(alternative["citations"])
+    status = concept.get("status") if isinstance(concept.get("status"), str) else "unknown"
+    stage = concept.get("stage") if isinstance(concept.get("stage"), str) else None
+    published_concern = trace.published_concept_assessment(debug) is not None
+    return {
+        "published_concern": published_concern,
+        "status": status,
+        "stage": stage,
+        "citation_count": len(set(item for item in citations if isinstance(item, str))),
+        "alternative_count": len(alternatives) if isinstance(alternatives, list) else 0,
+    }
+
+
+def _archaeology_research_completed(debug):
+    for name, stage in (debug.get("stages") or {}).items():
+        if not isinstance(stage, dict) or name != "archaeologist":
+            continue
+        if stage.get("status") == "completed":
+            return True
+    return False
+
+
+def _add_archaeology_counts(overview, research_completed, concept, published):
+    counts = overview["archaeology"]
+    if research_completed:
+        counts["research_completed"] += 1
+    if "status" in concept:
+        by_status = Counter(counts["assessment_status_counts"])
+        by_status[concept["status"]] += 1
+        counts["assessment_status_counts"] = dict(sorted(by_status.items()))
+    if concept.get("published_concern"):
+        counts["saved_concerns"] += 1
+        if published:
+            counts["published_concerns"] += 1
+
+
 def _add_finding_counts(overview, findings):
     kinds = Counter(overview["finding_kinds"])
     severities = Counter(overview["finding_severities"])
@@ -570,6 +637,8 @@ def _new_stage():
         "candidate_counts": Counter(
             {"publish": 0, "drop": 0, "unresolved": 0, "undisposed": 0}),
         "accepted_findings": 0,
+        "concept_stage": False,
+        "conceptual_concerns": 0,
         "sole_source_findings": 0,
         "shared_findings": 0,
         "attribution_unknown_reviews": 0,
@@ -608,6 +677,9 @@ def _add_stage_results(stages, debug):
         record = stages[_stage_key(name, model)]
         record["stage"] = name
         record["configured_model"] = model
+        stage_metrics = metrics.get(name, {})
+        record["concept_stage"] = bool(stage_metrics.get("concept_stage"))
+        record["conceptual_concerns"] += stage_metrics.get("conceptual_concerns", 0)
         record["saved_result_runs"] += 1
         status = stage.get("status") if isinstance(stage.get("status"), str) else "unknown"
         record["status_counts"][status] += 1
@@ -615,7 +687,6 @@ def _add_stage_results(stages, debug):
             record["skipped_runs"] += 1
         else:
             record["executed_runs"] += 1
-        stage_metrics = metrics.get(name, {})
         for disposition, count in stage_metrics.get("candidate_counts", {}).items():
             record["candidate_counts"][disposition] += count
         record["accepted_findings"] += stage_metrics.get("accepted_findings", 0)
@@ -637,6 +708,8 @@ def _add_stage_ledger(stages, request, configured_stage_models):
     record = stages[_stage_key(request["stage"], model)]
     record["stage"] = request["stage"]
     record["configured_model"] = model
+    if request["stage"] == "archaeologist":
+        record["concept_stage"] = True
     _add_request(record["ledger"], request)
 
 
@@ -664,6 +737,8 @@ def _stage_records(stages):
             "status_counts": dict(sorted(record["status_counts"].items())),
             "candidate_counts": dict(sorted(record["candidate_counts"].items())),
             "accepted_findings": accepted,
+            "concept_stage": record["concept_stage"],
+            "conceptual_concerns": record["conceptual_concerns"],
             "selected_candidate_findings": (
                 record["candidate_counts"]["publish"]),
             "sole_source_findings": record["sole_source_findings"],
@@ -689,6 +764,8 @@ def _stage_records(stages):
 def _stage_leaderboard(stages):
     records = []
     for record in stages.values():
+        if record["concept_stage"]:
+            continue
         accepted = record["accepted_findings"]
         selected_candidates = record["candidate_counts"]["publish"]
         cost = record["ledger"]["known_cost_micros"]

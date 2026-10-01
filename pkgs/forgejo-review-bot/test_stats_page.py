@@ -47,6 +47,11 @@ class StatsPageTests(unittest.TestCase):
                 "published_findings": 0,
                 "coverage": {"complete": 0, "partial": 0, "unknown": 0},
                 "attribution_coverage": {"complete": 0, "missing": 0},
+                "archaeology": {
+                    "research_completed": 0,
+                    "published_concerns": 0,
+                    "assessment_status_counts": {},
+                },
                 "finding_kinds": {},
                 "finding_severities": {},
             },
@@ -66,6 +71,10 @@ class StatsPageTests(unittest.TestCase):
                 "saved_review_cost_missing_ledger_count": 0,
                 "saved_review_tools": {"count": 0, "median": None, "p90": None, "max": None},
                 "saved_review_model_seconds": {"count": 0, "median": None, "p90": None, "max": None},
+                "saved_review_conceptual_concern_citations": {
+                    "count": 0, "median": None, "p90": None, "max": None},
+                "saved_review_conceptual_concern_alternatives": {
+                    "count": 0, "median": None, "p90": None, "max": None},
             },
             "paired_sol_glm": {
                 "completed_pairs": 0,
@@ -112,6 +121,11 @@ class StatsPageTests(unittest.TestCase):
             "saved_findings": 3,
             "published_findings": 3,
             "coverage": {"complete": 1, "partial": 1, "unknown": 0},
+            "archaeology": {
+                "research_completed": 2,
+                "published_concerns": 1,
+                "assessment_status_counts": {"verified": 1},
+            },
         })
         summary["spend"] = {
             "current_month": {
@@ -151,6 +165,8 @@ class StatsPageTests(unittest.TestCase):
                 "stage": "wallet",
                 "configured_model": "gpt-6.1-sol",
                 "accepted_findings": 3,
+                "concept_stage": False,
+                "conceptual_concerns": 0,
                 "selected_candidate_findings": 3,
                 "sole_source_findings": 2,
                 "shared_findings": 1,
@@ -165,6 +181,8 @@ class StatsPageTests(unittest.TestCase):
                 "stage": "tests",
                 "configured_model": "glm-5.3",
                 "accepted_findings": 1,
+                "concept_stage": False,
+                "conceptual_concerns": 0,
                 "selected_candidate_findings": 1,
                 "sole_source_findings": 1,
                 "shared_findings": 0,
@@ -186,6 +204,8 @@ class StatsPageTests(unittest.TestCase):
                 "status_counts": {"completed": 2},
                 "candidate_counts": {"publish": 3, "drop": 1, "unresolved": 1, "undisposed": 1},
                 "accepted_findings": 3,
+                "concept_stage": False,
+                "conceptual_concerns": 0,
                 "selected_candidate_findings": 3,
                 "sole_source_findings": 2,
                 "shared_findings": 1,
@@ -209,6 +229,8 @@ class StatsPageTests(unittest.TestCase):
                 "status_counts": {"completed": 1},
                 "candidate_counts": {"publish": 1, "drop": 3, "unresolved": 0, "undisposed": 0},
                 "accepted_findings": 1,
+                "concept_stage": False,
+                "conceptual_concerns": 0,
                 "selected_candidate_findings": 1,
                 "sole_source_findings": 1,
                 "shared_findings": 0,
@@ -231,6 +253,10 @@ class StatsPageTests(unittest.TestCase):
             "saved_review_cost_missing_ledger_count": 0,
             "saved_review_tools": {"count": 2, "median": 3, "p90": 5, "max": 5},
             "saved_review_model_seconds": {"count": 2, "median": 12.5, "p90": 20, "max": 20},
+            "saved_review_conceptual_concern_citations": {
+                "count": 1, "median": 2, "p90": 2, "max": 2},
+            "saved_review_conceptual_concern_alternatives": {
+                "count": 1, "median": 3, "p90": 3, "max": 3},
         }
         summary["paired_sol_glm"] = {
             "completed_pairs": 2,
@@ -253,6 +279,14 @@ class StatsPageTests(unittest.TestCase):
                 "routing": {"selected_tier": "cheap"},
                 "coverage": "partial",
                 "findings": {"saved": 1, "published": 1},
+                "archaeology": {
+                    "research_completed": True,
+                    "published_concern": True,
+                    "status": "verified",
+                    "stage": "archaeologist",
+                    "citation_count": 2,
+                    "alternative_count": 3,
+                },
                 "ledger": self.request_totals(request_count=3, known_cost_micros=234_000,
                                               reserved_micros=200_000),
                 "tokens": {"input": 10, "output": 2, "cached": 1, "cache_write": 0},
@@ -273,6 +307,7 @@ class StatsPageTests(unittest.TestCase):
                 "routing": {"selected_tier": "deep"},
                 "coverage": "complete",
                 "findings": {"saved": 2, "published": 2},
+                "archaeology": {"research_completed": True, "published_concern": False},
                 "ledger": self.request_totals(request_count=4, known_cost_micros=1_000_000,
                                               reserved_micros=100_000),
                 "tokens": {"input": 20, "output": 4, "cached": 2, "cache_write": 1},
@@ -300,9 +335,13 @@ class StatsPageTests(unittest.TestCase):
         _, html, _ = self.save(self.rich_summary())
 
         self.assertLess(html.index('class="cards"'), html.index('id="leaderboard"'))
-        self.assertLess(html.index('id="leaderboard"'), html.index('id="paired"'))
+        self.assertLess(html.index('id="leaderboard"'), html.index('id="concepts"'))
+        self.assertLess(html.index('id="concepts"'), html.index('id="paired"'))
         self.assertLess(html.index('id="paired"'), html.index('id="spend"'))
         self.assertIn("Accepted finding leaderboard", html)
+        self.assertIn("Conceptual concerns", html)
+        self.assertIn("Median citations: 2.0; median alternatives: 3.0.", html)
+        self.assertIn("research complete; no concern", html)
         self.assertIn("Shared findings are credited to each contributing agent", html)
         self.assertIn("Paired model reviews", html)
 

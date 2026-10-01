@@ -297,6 +297,34 @@ class EvaluateTests(unittest.TestCase):
             "budget": {"estimated_total_usd": 0.12},
             "raw_debug": {
                 "coverage": {"status": "partial"},
+                "concept_assessment": {
+                    "status": "verified",
+                    "stage": "archaeologist",
+                    "summary": "Fix it in the policy layer.",
+                    "verification": {
+                        "disposition": "publish",
+                        "reason": "Verified conceptual concern.",
+                        "assessment": {
+                            "problem": "The PR changes peer eviction policy.",
+                            "baseline": "Keep existing behavior.",
+                            "delivered_benefit": "Removes a workaround.",
+                            "relevant_history": "A prior attempt chose another layer.",
+                            "recommendation": "Fix it in the policy layer.",
+                            "decisive_question": "Whether the workaround is still common.",
+                            "technical_assumptions": ["Verifier checks the changed path."],
+                            "alternatives": [{
+                                "name": "Do nothing",
+                                "concept": "Keep status quo",
+                                "benefit": "No churn",
+                                "cost": "Workaround remains",
+                                "unresolved": "Impact",
+                                "provenance": "history",
+                                "citations": [],
+                            }],
+                            "citations": [],
+                        },
+                    },
+                },
                 "candidate_sources": {
                     "state:1": "state",
                     "state:2": "state",
@@ -341,6 +369,8 @@ class EvaluateTests(unittest.TestCase):
                             "elapsed_seconds": 1.5,
                         }],
                     },
+                    "archaeologist": {"model": "gpt-6-luna", "status": "completed",
+                                      "turns": [], "tools": [{"name": "web_search"}]},
                 },
             },
         })
@@ -352,7 +382,19 @@ class EvaluateTests(unittest.TestCase):
             "error": {"type": "RuntimeError", "message": "model failed"},
             "budget": {"estimated_total_usd": 0.20},
             "raw_debug": {
+                "concept_assessment": {
+                    "status": "no_concern",
+                    "stage": "archaeologist",
+                    "verification": {
+                        "disposition": "no_concern",
+                        "reason": "No conceptual objection verified.",
+                        "assessment": None,
+                    },
+                },
                 "stages": {
+                    "archaeologist": {"model": "gpt-6-luna",
+                                      "status": "completed",
+                                      "turns": [], "tools": []},
                     "design": {
                         "model": "gpt-unknown",
                         "status": "budget_exhausted",
@@ -388,6 +430,10 @@ class EvaluateTests(unittest.TestCase):
         self.assertEqual(group["decision_counts"],
                          {"published": 2, "dropped": 1, "unresolved": 1})
         self.assertEqual(group["accepted_findings"], 2)
+        self.assertEqual(group["archaeology_research_completed"], 2)
+        self.assertEqual(group["published_conceptual_concerns"], 1)
+        self.assertEqual(group["conceptual_concern_status_counts"],
+                         {"no_concern": 1, "verified": 1})
         self.assertEqual(group["cost_usd"]["total"], 0.000011)
         self.assertEqual(group["unknown_usage_runs"], 1)
         self.assertEqual(group["unknown_usage_turns"], 1)
@@ -406,6 +452,10 @@ class EvaluateTests(unittest.TestCase):
         self.assertEqual(group["stage_metrics"]["tests"]["published_candidates"], 1)
         self.assertEqual(group["stage_metrics"]["tests"]["unresolved_candidates"], 1)
         self.assertEqual(group["stage_metrics"]["tests"]["shared_accepted_findings"], 1)
+        self.assertTrue(group["stage_metrics"]["archaeologist"]["concept_stage"])
+        self.assertEqual(
+            group["stage_metrics"]["archaeologist"]["conceptual_concerns"], 1)
+        self.assertEqual(group["stage_metrics"]["archaeologist"]["accepted_findings"], 0)
         self.assertIn("does not match labels", summary["labels_note"])
 
     def test_summarize_cli_reads_artifacts_without_credentials(self):

@@ -29,7 +29,8 @@ def _turn_usage(turn, fallback_model):
     usage = {"input_tokens": turn.get("input_tokens"),
              "output_tokens": turn.get("output_tokens"),
              "cached_tokens": turn.get("cached_tokens", 0),
-             "cache_write_tokens": turn.get("cache_write_tokens")}
+             "cache_write_tokens": turn.get("cache_write_tokens"),
+             "web_search_calls": turn.get("web_search_calls", 0)}
     return usage, price_usd(turn.get("model") or fallback_model, usage)
 
 
@@ -55,9 +56,29 @@ def finding_attribution(debug):
     return list(attribution) if isinstance(attribution, list) else []
 
 
-def _new_stage_metrics(stage):
+def concept_assessment(debug):
+    assessment = debug.get("concept_assessment") if isinstance(debug, dict) else None
+    return assessment if isinstance(assessment, dict) else {}
+
+
+def published_concept_assessment(debug):
+    concept = concept_assessment(debug)
+    verification = concept.get("verification")
+    if (concept.get("status") == "verified"
+            and isinstance(verification, dict)
+            and verification.get("disposition") == "publish"
+            and isinstance(verification.get("assessment"), dict)
+            and isinstance(concept.get("summary"), str)
+            and concept["summary"].strip()):
+        return verification["assessment"]
+    return None
+
+
+def _new_stage_metrics(name, stage):
     record = {"model": stage.get("model"),
               "status": stage.get("status", "unknown"),
+              "concept_stage": name == "archaeologist",
+              "conceptual_concerns": 0,
               "calls": len(stage.get("turns", [])),
               "tool_calls": len(stage.get("tools", [])),
               "candidate_counts": {
@@ -74,8 +95,17 @@ def _new_stage_metrics(stage):
 def stage_metrics(debug):
     stages = debug.get("stages") or {}
     candidate_sources = debug.get("candidate_sources") or {}
-    metrics = {name: _new_stage_metrics(stage)
+    metrics = {name: _new_stage_metrics(name, stage)
                for name, stage in stages.items() if isinstance(stage, dict)}
+    assessment = concept_assessment(debug)
+    if published_concept_assessment(debug) is not None:
+        assessment_stage = assessment.get("stage")
+        if not isinstance(assessment_stage, str) or assessment_stage not in metrics:
+            concept_stages = [name for name, record in metrics.items()
+                              if record.get("concept_stage")]
+            assessment_stage = concept_stages[0] if len(concept_stages) == 1 else None
+        if assessment_stage in metrics:
+            metrics[assessment_stage]["conceptual_concerns"] = 1
 
     candidates_by_stage = {}
     disposed_candidate_ids = set()
@@ -177,7 +207,8 @@ def review_trace(debug, prompt_config):
     if attribution:
         trace["finding_attribution"] = attribution
     trace["stage_metrics"] = stage_metrics(debug)
-    for key in ("routing", "coverage", "candidate_sources", "verification_budget", "ppq_budget"):
+    for key in ("routing", "coverage", "candidate_sources", "verification_budget",
+                "ppq_budget", "concept_assessment"):
         if key in debug:
             trace[key] = debug[key]
     if debug.get("stage_outputs"):
@@ -201,7 +232,7 @@ def review_trace(debug, prompt_config):
     if "decisions" in debug:
         trace["decisions"] = debug["decisions"]
     trace.update(metrics)
-    trace["pricing_note"] = ("Estimated from token usage at configured model rates. "
+    trace["pricing_note"] = ("Estimated from token usage and hosted web searches at configured rates. "
                              "Unknown usage is excluded from this subtotal; the budget "
                              "includes uncertain reservations. Missing cache-write "
                              "counts use the conservative cache-write rate.")
@@ -219,6 +250,7 @@ def save_review_trace(state_dir, number, head_sha, content, debug, prompt_config
               "ppq_budget": debug.get("ppq_budget"),
               "candidate_sources": debug.get("candidate_sources", {}),
               "decisions": debug.get("decisions", []),
+              "concept_assessment": debug.get("concept_assessment", {}),
               "finding_attribution": debug.get("finding_attribution", []),
               "trace": review_trace(debug, prompt_config)}
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)

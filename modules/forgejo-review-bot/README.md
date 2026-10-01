@@ -21,7 +21,9 @@ the shared monthly allowance.
 
 The model can also search and read other public issues and pull requests in the
 same repository, including a small sample of ordinary comments. The current PR
-is excluded from these tools, so its comments cannot influence the review.
+is excluded from code discovery. A separate Luna archaeologist researches the
+current discussion, original upstream reviews, previous attempts and alternatives.
+Its brief goes to the verifier after independent code discovery.
 These reads use no Forgejo credentials and are limited to eight calls per
 tool-enabled stage.
 It can inspect up to 20 lines of merge-base blame and read a related ancestor
@@ -56,6 +58,15 @@ correct. It compares the claimed outcome with what the mechanism guarantees.
 Grounded design questions can be published when their factual premise is
 verified and the answer would settle a material tradeoff.
 
+The archaeologist returns a source-backed brief about the problem, baseline,
+delivered benefit, history and credible alternatives. It has no code tools.
+The verifier checks its decisive claims and technical assumptions before
+publishing a short "Concept and approach" concern, including when no code
+findings survive. Sound approaches produce no public concept section. Concerns
+must establish an unfavorable tradeoff or a materially better alternative; a
+question must settle a specific material concern. Unsupported assessments are withheld; editor failure retains
+the verified wording. The detailed brief appears in the full report.
+
 The Luna design pass uses extra-high reasoning. Both adversarial reviews and
 Luna verification of sensitive reviews use high reasoning. These stages each
 have a 25,000-token allowance per response for reasoning and visible output
@@ -73,7 +84,9 @@ invalid edit falls back to the verifier's wording without truncating findings.
 
 Routine discovery stages get up to 12 tool inspections, standard stages 24,
 and sensitive stages 48. The adversarial passes and verifier each get
-48. With an allowance of N inspections, the model can make up to N tool calls
+48. Archaeology gets twelve total inspections, including hosted web actions,
+with at most two hosted actions per response. Search charges are included in
+the OpenAI spending allowance. With an allowance of N inspections, the model can make up to N tool calls
 across at most N + 1 responses, leaving a final response without tools. The
 router and writing pass have no tools. The final response and all inspections
 remain subject to the spending ceiling. At the inspection limit, further reads
@@ -82,7 +95,8 @@ evidence. Debug output records the limit and which requests were skipped.
 
 Discovery stages return structured candidates. The verifier accounts for each
 candidate as published, dropped or unresolved, and the writing pass receives
-only accepted findings. Python checks finding IDs and preserves verified
+accepted findings and a separately verified conceptual assessment. Python checks
+finding IDs and preserves verified
 locations and severity. A bad verifier finding is withheld without discarding
 other valid findings, and debug output identifies the validation error. Partial
 coverage alone does not discard findings. Broken candidate accounting or a
@@ -151,7 +165,10 @@ review jobs and both spend ledgers without model calls or credentials. It ranks
 agents and models by verifier-accepted findings, separates sole and shared
 contributions, and shows execution opportunities, candidate dispositions,
 coverage, routing, token usage, costs, and review details. Shared findings earn
-credit for each contributing agent, so leaderboard counts overlap.
+credit for each contributing agent, so leaderboard counts overlap. Conceptual
+concerns have separate saved/published counts and do not inflate finding
+counts. Archaeology costs and execution remain visible outside the finding
+leaderboard.
 
 Distinct review jobs and paid request attempts are counted separately. Retries
 increase request counts and ledger spend; they do not duplicate the final
@@ -249,11 +266,12 @@ be derived from `forgejoApi`.
 - `routingMode = "full"`: request every audit without calling the router.
 - `modelsJson = null`: optional per-stage replacement for the model map.
   The map must include router, independent, adversarial, adversarial_glm, concurrency, state,
-  public_contract, tests, design, build, verifier and collator.
+  public_contract, tests, design, build, archaeologist, verifier and collator.
   Prices must also be supported by the bot's ledger.
 
 Custom prompt directories must include `consensus.md`, `wallet.md`, `p2p.md`,
-`concurrency.md` and `build.md`; remove `developer_notes` from custom model maps.
+`concurrency.md`, `build.md` and `archaeologist.md`. Custom model maps must
+include `archaeologist`; old complete maps are rejected.
 Update custom prompt/model configurations together. Unsupported model names
 are rejected when configuration loads. The existing verifier model override
 can be used for controlled Sol comparisons while the default stays on Luna.
@@ -294,7 +312,9 @@ forgejo-review-bot-evaluate capture \
 Capture retains complete Git objects in a dedicated evaluation checkout. The
 initial download can be large. Keep that checkout with the manifests.
 Replay reads frozen title/body, commit IDs, Git objects and prompt/model
-configuration; discussion tools and lazy Git downloads are disabled:
+configuration; discussion tools, live web research and lazy Git downloads are
+disabled. Archaeology is skipped because frozen manifests do not capture its
+sources:
 
 ```sh
 forgejo-review-bot-evaluate run \

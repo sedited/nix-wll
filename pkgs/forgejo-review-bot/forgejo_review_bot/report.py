@@ -6,6 +6,7 @@ import os
 import re
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from . import trace
 
@@ -28,6 +29,14 @@ ATTRIBUTION_FIELDS = (
 FINDING_FIELDS = ("kind", "severity", "path", "line", "side", "title", "body")
 CANDIDATE_FIELDS = ("kind", "path", "line", "side", "title", "claim", "consequence",
                     "evidence", "correction", "uncertainty")
+TOOL_FIELDS = ("name", "output_bytes", "output_sha256", "skipped", "hosted",
+               "action_type", "retrieved_at")
+CONCEPT_FIELDS = ("status", "stage", "model", "problem", "baseline",
+                  "delivered_benefit", "relevant_history", "recommendation",
+                  "decisive_question", "technical_assumptions")
+CONCEPT_ALTERNATIVE_FIELDS = ("name", "concept", "benefit", "cost", "unresolved",
+                              "provenance")
+CONCEPT_CITATION_FIELDS = ("title", "url", "description")
 
 
 def _scalar(value):
@@ -42,6 +51,27 @@ def _filtered(record, fields):
 
 def _strings(value):
     return [item for item in value if isinstance(item, str)] if isinstance(value, list) else []
+
+
+def _text_or_strings(value):
+    if isinstance(value, str):
+        return value
+    strings = _strings(value)
+    return strings if strings else None
+
+
+def _safe_http_url(url):
+    if not isinstance(url, str):
+        return None
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return None
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc or not parsed.hostname:
+        return None
+    if parsed.username or parsed.password:
+        return None
+    return url
 
 
 def _public_coverage(coverage):
@@ -61,6 +91,33 @@ def _public_validation_errors(stage):
             record["error"] = item["error"]
         errors.append(record)
     return errors
+
+
+def _public_tools(stage):
+    tools = []
+    for tool in stage.get("tools") or []:
+        if not isinstance(tool, dict):
+            continue
+        record = _filtered(tool, TOOL_FIELDS)
+        sources = []
+        for source in tool.get("sources") or []:
+            if isinstance(source, str):
+                url = _safe_http_url(source)
+                if url is not None:
+                    sources.append(url)
+            elif isinstance(source, dict):
+                item = {key: source[key] for key in ("type", "title")
+                        if isinstance(source.get(key), str)}
+                url = _safe_http_url(source.get("url"))
+                if url is not None:
+                    item["url"] = url
+                if item:
+                    sources.append(item)
+        if sources:
+            record["sources"] = sources
+        if record:
+            tools.append(record)
+    return tools
 
 
 def _public_stages(debug):
@@ -84,6 +141,9 @@ def _public_stages(debug):
         validation_errors = _public_validation_errors(stage)
         if validation_errors:
             record["validation_errors"] = validation_errors
+        tools = _public_tools(stage)
+        if tools:
+            record["tools"] = tools
         raw_output = stage.get("raw_output")
         if isinstance(raw_output, str):
             record["raw_output"] = raw_output
@@ -129,6 +189,99 @@ def _public_decisions(debug):
     return decisions
 
 
+def _public_concept_citation(citation):
+    if isinstance(citation, str):
+        record = {"title": citation}
+        url = _safe_http_url(citation)
+        if url is not None:
+            record["url"] = url
+        return record
+    if not isinstance(citation, dict):
+        return None
+    record = _filtered(citation, CONCEPT_CITATION_FIELDS)
+    url = _safe_http_url(record.get("url"))
+    if url is None:
+        record.pop("url", None)
+    else:
+        record["url"] = url
+    return record if record else None
+
+
+def _public_concept_assessment(debug):
+    assessment = trace.concept_assessment(debug)
+    if not assessment:
+        return None
+    record = {}
+    for key in ("status", "stage", "summary", "edited_by", "reason", "error_type"):
+        if isinstance(assessment.get(key), str):
+            record[key] = assessment[key]
+    if isinstance(assessment.get("used_verified_wording"), bool):
+        record["used_verified_wording"] = assessment["used_verified_wording"]
+    coverage = _public_coverage(assessment.get("coverage"))
+    if coverage:
+        record["coverage"] = coverage
+    candidate = _public_concept_brief(assessment.get("candidate"))
+    if candidate:
+        record["candidate"] = candidate
+    verification = assessment.get("verification")
+    verified = None
+    if isinstance(verification, dict):
+        public_verification = {}
+        for key in ("disposition", "reason"):
+            if isinstance(verification.get(key), str):
+                public_verification[key] = verification[key]
+        verified = _public_concept_brief(verification.get("assessment"))
+        if verified:
+            public_verification["assessment"] = verified
+        if public_verification:
+            record["verification"] = public_verification
+    if verified:
+        record.update(verified)
+    elif any(key in assessment for key in ("problem", "alternatives", "citations")):
+        brief = _public_concept_brief(assessment)
+        if brief:
+            record.update(brief)
+    return record or None
+
+
+def _public_concept_brief(assessment):
+    if not isinstance(assessment, dict):
+        return None
+    record = {}
+    for key in CONCEPT_FIELDS:
+        value = _text_or_strings(assessment.get(key))
+        if value is not None:
+            record[key] = value
+    alternatives = []
+    for alternative in assessment.get("alternatives") or []:
+        if not isinstance(alternative, dict):
+            continue
+        public = {}
+        for key in CONCEPT_ALTERNATIVE_FIELDS:
+            value = _text_or_strings(alternative.get(key))
+            if value is not None:
+                public[key] = value
+        citations = []
+        for citation in alternative.get("citations") or []:
+            public_citation = _public_concept_citation(citation)
+            if public_citation:
+                citations.append(public_citation)
+        if citations:
+            public["citations"] = citations
+        if public:
+            alternatives.append(public)
+    if alternatives:
+        record["alternatives"] = alternatives
+    citations = []
+    for citation in assessment.get("citations") or []:
+        public = _public_concept_citation(citation)
+        if public:
+            citations.append(public)
+    if citations:
+        record["citations"] = citations
+    return record or None
+
+
 def _public_record(number, head_sha, content, debug, prompt_config, report_id):
     record = {
         "report_id": report_id,
@@ -141,6 +294,7 @@ def _public_record(number, head_sha, content, debug, prompt_config, report_id):
         "stage_outputs": _public_stage_outputs(debug),
         "stage_metrics": trace.stage_metrics(debug),
         "metrics": trace.review_metrics(debug, prompt_config),
+        "concept_assessment": _public_concept_assessment(debug),
         "finding_attribution": _public_attribution(debug),
         "decisions": _public_decisions(debug),
         "notice": (
@@ -206,6 +360,93 @@ def _findings_html(attribution):
 
 def _json_html(value):
     return f"<pre>{_escape(json.dumps(value, ensure_ascii=False, indent=2))}</pre>"
+
+
+def _paragraphs(record, keys):
+    paragraphs = []
+    for key, label in keys:
+        value = record.get(key)
+        if isinstance(value, str) and value:
+            paragraphs.append(f"<p><strong>{_escape(label)}:</strong> {_escape(value)}</p>")
+    return "".join(paragraphs)
+
+
+def _concept_value_html(value):
+    if isinstance(value, list):
+        return "<ul>" + "".join(f"<li>{_escape(item)}</li>" for item in value) + "</ul>"
+    return _escape(value)
+
+
+def _concept_assessment_html(assessment):
+    if not isinstance(assessment, dict) or not assessment:
+        return "<p>No conceptual concern was recorded.</p>"
+    verification = assessment.get("verification") if isinstance(
+        assessment.get("verification"), dict) else {}
+    brief = verification.get("assessment")
+    if not isinstance(brief, dict):
+        brief = assessment.get("candidate") if isinstance(assessment.get("candidate"), dict) else {}
+    body = _paragraphs(assessment, (
+        ("status", "Status"),
+        ("summary", "Published summary"),
+    ))
+    body += _paragraphs(verification, (
+        ("disposition", "Verifier disposition"),
+        ("reason", "Verifier reason"),
+    ))
+    body += _paragraphs(brief, (
+        ("recommendation", "Recommendation"),
+        ("problem", "Problem"),
+        ("baseline", "Baseline"),
+        ("delivered_benefit", "Delivered benefit"),
+        ("relevant_history", "Relevant history"),
+        ("decisive_question", "Question that could change this"),
+        ("technical_assumptions", "Technical assumptions"),
+    ))
+    alternatives = brief.get("alternatives") if isinstance(
+        brief.get("alternatives"), list) else []
+    if alternatives:
+        rows = []
+        for alternative in alternatives:
+            if not isinstance(alternative, dict):
+                continue
+            details = []
+            for key, label in (("concept", "Concept"), ("benefit", "Benefit"),
+                               ("cost", "Cost"), ("unresolved", "Unresolved")):
+                if alternative.get(key):
+                    details.append(
+                        f"<p><strong>{_escape(label)}:</strong> "
+                        f"{_concept_value_html(alternative[key])}</p>"
+                    )
+            rows.append(
+                "<tr>"
+                f"<td>{_escape(alternative.get('name'))}</td>"
+                f"<td>{_escape(alternative.get('provenance'))}</td>"
+                f"<td>{''.join(details)}</td>"
+                "</tr>"
+            )
+        if rows:
+            body += (
+                "<h3>Alternatives</h3><table><thead><tr><th>Concept</th>"
+                "<th>Provenance</th><th>Assessment</th></tr></thead>"
+                f"<tbody>{''.join(rows)}</tbody></table>"
+            )
+    sources = brief.get("citations") if isinstance(brief.get("citations"), list) else []
+    links = []
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        title = source.get("title") or source.get("url") or source.get("description")
+        if not title:
+            continue
+        if source.get("url"):
+            label = f'<a href="{_escape(source["url"])}">{_escape(title)}</a>'
+        else:
+            label = _escape(title)
+        description = source.get("description")
+        links.append(f"<li>{label}{': ' + _escape(description) if description else ''}</li>")
+    if links:
+        body += f"<h3>Sources</h3><ul>{''.join(links)}</ul>"
+    return body or "<p>No conceptual concern was recorded.</p>"
 
 
 def _reply_json(text):
@@ -339,6 +580,10 @@ summary {{ cursor: pointer; font-weight: 600; }}
 <section>
 <h2>Verified Review</h2>
 <pre>{_escape(record['review'])}</pre>
+</section>
+<section>
+<h2>Concept and Approach</h2>
+{_concept_assessment_html(record.get('concept_assessment'))}
 </section>
 <section>
 <h2>Coverage</h2>

@@ -2,7 +2,8 @@
 
 The bot performs static Bitcoin Core PR reviews. It discovers candidate findings
 in independent passes, checks them against repository evidence, and publishes
-only verified findings. It does not build or execute PR code.
+verified findings and a separately verified conceptual assessment. It does not
+build or execute PR code.
 
 These diagrams describe the checked-in defaults. [models.json](audits/models.json)
 assigns models; callers can replace the complete map with `--models-json`.
@@ -20,7 +21,7 @@ flowchart TD
     workers --> collect["Fetch refs and collect immutable base/head snapshot"]
     collect --> existing{"Same base and head already reviewed?"}
     existing -->|yes| done["Complete without model calls"]
-    existing -->|no| pipeline["Route, discover, verify and edit"]
+    existing -->|no| pipeline["Route, discover, research, verify and edit"]
     pipeline --> saved["Save result before publication"]
     saved --> report["Optional public HTML and JSON report"]
     report --> publish["Create or update one bot comment per PR"]
@@ -101,10 +102,11 @@ flowchart TD
     glm --> focused
     sensitive -->|no| focused
     focused --> order["concurrency → state → public_contract → build → tests → design"]
-    order --> verifier["Verifier: gpt-6-luna / repository tools"]
-    verifier --> accepted{"Any accepted findings?"}
-    accepted -->|yes| collator["Collator: gpt-6-luna / prose only"]
-    accepted -->|no| render["Python renders findings and coverage limitations"]
+    order --> archaeology["Archaeologist: gpt-6-luna / discussion and web research"]
+    archaeology --> verifier["Verifier: gpt-6-luna / code and research evidence"]
+    verifier --> accepted{"Accepted findings or conceptual concern?"}
+    accepted -->|yes| collator["Collator: gpt-6-luna / verified prose only"]
+    accepted -->|no| render["Python renders concept, findings and coverage limitations"]
     collator --> render
 ```
 
@@ -112,7 +114,8 @@ Skipped audits do not make model calls. Escalation can add pending stages during
 discovery. Sol and GLM run concurrently when a PPQ key is supplied; without that
 key, the Python pipeline runs Sol alone. The service CLI requires both keys.
 Reviewers do not see other discovery passes' candidates. The verifier sees the
-pooled candidates and original review input.
+pooled candidates, original review input and archaeology brief. Code discovery
+does not receive the archaeology brief or current PR discussion.
 
 | Stage | Default model | Reasoning effort | Per-response output token ceiling | Evidence access |
 | --- | --- | --- | --- | --- |
@@ -123,17 +126,24 @@ pooled candidates and original review input.
 | concurrency | gpt-6-luna | medium | 8,000 | Focused input and code tools |
 | state, public_contract, build, tests | gpt-6-luna | low | 4,000 | Focused input and code tools |
 | design | gpt-6-luna | xhigh | 25,000 | Focused input, code tools and merge-base developer notes |
-| verifier, routine/standard | gpt-6-luna | low | 8,000 | Original input, candidates and full tool set |
-| verifier, sensitive | gpt-6-luna | high | 25,000 | Original input, candidates and full tool set |
-| collator | gpt-6-luna | low | 6,000 | Accepted findings only; no tools |
+| verifier, routine/standard | gpt-6-luna | low | 8,000 | Original input, candidates, archaeology brief, code and research tools |
+| verifier, sensitive | gpt-6-luna | high | 25,000 | Original input, candidates, archaeology brief, code and research tools |
+| archaeologist | gpt-6-luna | low | 4,000 | PR context, discussion and web research; no code tools |
+| collator | gpt-6-luna | low | 6,000 | Accepted findings and conceptual assessment; no tools |
 
 Code tools find paths, read head/base files, read diffs and search code. The full
 tool set also reads base history and other PR discussions. Current PR discussion
-is excluded. Frozen evaluations disable discussion access.
+is excluded from code discovery. The archaeologist and verifier can read current
+discussion and original upstream review threads. Frozen evaluations disable live
+research and skip archaeology because their manifests do not capture discussions.
 
 Discovery allows 12 tool calls at routine tier, 24 at standard, and 48 at sensitive.
-Both adversarial passes and verification allow 48. History and other-discussion
-sublimits are eight each per tool-enabled stage. Independent, adversarial and
+Both adversarial passes and verification allow 48. History and discussion
+sublimits are eight each per tool-enabled stage. Archaeology has twelve total
+inspections. Hosted web actions count toward the stage limit and are capped at
+two per response. Search fees and evidence-token headroom are reserved in the
+existing OpenAI allowance; opening or finding text within a page is not a paid
+search action. Independent, adversarial and
 verifier stages require a first inspection. At limits, a final turn uses collected
 evidence and must preserve uncertainty.
 
@@ -153,6 +163,11 @@ Sources: [pipeline.py](forgejo_review_bot/pipeline.py),
 
 ```mermaid
 flowchart TD
+    archaeology["Archaeologist: sourced conceptual brief"] --> conceptcheck["Verifier checks historical claims and technical premises"]
+    conceptcheck --> conceptdecision{"Supported conceptual assessment?"}
+    conceptdecision -->|yes| concept["Separate assessment: no severity or code location"]
+    conceptdecision -->|no| withheld["Withhold assessment; retain valid findings"]
+    concept --> edit
     discovery["Discovery emits structured candidate claims and evidence"] --> valid{"Candidate response passes Python validation?"}
     valid -->|no| failed["Discard that stage's candidates; record limitation"]
     valid -->|yes| pool["Assign stage:index IDs and pool candidates"]
@@ -167,7 +182,7 @@ flowchart TD
     check -->|yes| accepted["Assign finding:N ID; accept"]
     verifier --> new["Verifier may discover a new issue with no candidate IDs"]
     new --> finding
-    accepted --> edit["Collator edits title and body only"]
+    accepted --> edit["Collator edits verified findings and conceptual prose"]
     edit --> ids{"Exactly every accepted ID once?"}
     ids -->|yes| edited["Use edited prose with original metadata"]
     ids -->|"no, failure or exhausted budget"| fallback["Use all original verified findings"]
@@ -213,3 +228,42 @@ causal credit.
 Sources: [protocol.py](forgejo_review_bot/protocol.py),
 [verifier prompt](audits/verifier.md), [collator prompt](audits/collator.md),
 [report.py](forgejo_review_bot/report.py), [stats.py](forgejo_review_bot/stats.py).
+
+## Concept and history
+
+The archaeologist receives the PR rationale, commit summaries and changed paths
+without the patch. It researches whether the proposed outcome is worth pursuing and
+which approach has the strongest support. It establishes the problem, the cost
+of doing nothing, the benefit delivered by the submitted proposal, and relevant
+prior attempts. It compares the proposal with the baseline and up to two
+credible alternatives, identifying where each alternative came from. Promised
+follow-ups do not count as delivered benefits.
+
+Research follows explicit references before searching more broadly. Discussion
+reads use bounded pages and can fetch a linked GitHub comment directly. Returned
+text records retrieval time and truncation; private traces retain the evidence
+sent to models. Hosted search actions and source links appear in report metadata. Historical
+claims need source links. Earlier objections must be checked for later answers;
+an abandoned PR does not establish that its concept was rejected. Skepticism
+applies to the status quo and suggested alternatives as well as the proposal.
+The brief records technical assumptions for the verifier, a conditional
+recommendation, and the question or evidence most likely to change it. It does
+not perform another code audit or produce ACK/NACK labels.
+
+The verifier checks the premises before accepting a separate conceptual
+assessment. This assessment has no finding ID, severity or artificial source
+location. The collator can edit it even when there are no accepted code findings.
+The public review includes "Concept and approach" only for a supported objection
+or a materially better alternative. Sound approaches produce no concept section.
+A question belongs here only if its answer settles a specific material concern.
+The full research brief remains in the report. Invalid or unverified assessments are
+withheld. Failed editing falls back to verified wording.
+
+Reports and statistics count published conceptual concerns separately from
+findings and distinguish them from completed research.
+Archaeology usage and costs remain visible, but the stage does not compete in
+the finding leaderboard. These counts measure output, not recommendation quality.
+For a before/after comparison, use the same PR head and inspect whether the new
+assessment recovers material history, recognises answered objections, and makes
+a defensible choice between approaches. A live rerun can see newer discussion;
+its evidence is not a frozen historical replay.

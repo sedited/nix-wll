@@ -35,6 +35,34 @@ class StatsTests(unittest.TestCase):
             "debug": {
                 "private_state": "PRIVATE debug marker",
                 "coverage": {"status": "partial", "limitations": ["missing run"]},
+                "concept_assessment": {
+                    "status": "verified",
+                    "stage": "archaeologist",
+                    "summary": "Fix this in the policy layer. https://code.example.org/org/repo/pulls/1",
+                    "verification": {
+                        "disposition": "publish",
+                        "reason": "The layering concern is supported.",
+                        "assessment": {
+                            "problem": "The PR changes peer eviction policy.",
+                            "baseline": "Keep the current policy.",
+                            "delivered_benefit": "Removes one documented operator workaround.",
+                            "relevant_history": "Prior discussion asked for a narrower layer.",
+                            "recommendation": "Fix it in the policy layer.",
+                            "decisive_question": "Whether the old workaround is still needed.",
+                            "technical_assumptions": ["Verifier checks the policy call path."],
+                            "alternatives": [{
+                                "name": "Do nothing",
+                                "concept": "Keep the current policy.",
+                                "benefit": "No behavior churn.",
+                                "cost": "The workaround remains.",
+                                "unresolved": "Current impact is unclear.",
+                                "provenance": "agent_inference",
+                                "citations": [],
+                            }],
+                            "citations": ["https://code.example.org/org/repo/pulls/1"],
+                        },
+                    },
+                },
                 "routing": {
                     "mode": "enabled",
                     "minimum_tier": "standard",
@@ -134,6 +162,19 @@ class StatsTests(unittest.TestCase):
                         "turns": [],
                         "tools": [],
                     },
+                    "archaeologist": {
+                        "model": "gpt-6-luna",
+                        "status": "completed",
+                        "turns": [{
+                            "model": "gpt-6-luna",
+                            "input_tokens": 40,
+                            "cached_tokens": 0,
+                            "cache_write_tokens": 0,
+                            "output_tokens": 10,
+                            "elapsed_seconds": 0.5,
+                        }],
+                        "tools": [{"name": "web_search"}],
+                    },
                 },
             },
         }
@@ -205,6 +246,8 @@ class StatsTests(unittest.TestCase):
                                     cache_write_tokens=None), 200, 0),
             ("openai-4", review_id, "adversarial", "gpt-6.1-sol", month,
              "settled", self.usage(60, 12), 150, 0),
+            ("openai-5", review_id, "archaeologist", "gpt-6-luna", month,
+             "settled", self.usage(40, 10), 50, 0),
         ])
         self.create_ledger("ppq-spend.sqlite3", [
             ("glm-1", review_id, "adversarial_glm", "z-ai/glm-5.3", month,
@@ -229,12 +272,17 @@ class StatsTests(unittest.TestCase):
         self.assertEqual(summary["overview"]["saved_findings"], 1)
         self.assertEqual(summary["overview"]["finding_kinds"], {"defect": 1})
         self.assertEqual(summary["overview"]["finding_severities"], {"high": 1})
-        self.assertEqual(summary["spend"]["lifetime"]["request_count"], 6)
-        self.assertEqual(summary["spend"]["lifetime"]["known_cost_micros"], 750)
+        self.assertEqual(summary["spend"]["lifetime"]["request_count"], 7)
+        self.assertEqual(summary["spend"]["lifetime"]["known_cost_micros"], 800)
         self.assertEqual(summary["spend"]["lifetime"]["reserved_micros"], 1200)
         self.assertEqual(summary["spend"]["lifetime"]["unknown_cost_request_count"], 2)
+        self.assertEqual(summary["overview"]["archaeology"]["research_completed"], 1)
+        self.assertEqual(summary["overview"]["archaeology"]["published_concerns"], 1)
+        self.assertEqual(summary["overview"]["archaeology"]["assessment_status_counts"],
+                         {"verified": 1})
 
         leaderboard = summary["stage_model_leaderboard"]
+        self.assertFalse(any(item["stage"] == "archaeologist" for item in leaderboard))
         glm_leader = next(item for item in leaderboard
                           if item["stage"] == "adversarial_glm")
         self.assertEqual(glm_leader["configured_model"], "glm-5.3")
@@ -248,14 +296,25 @@ class StatsTests(unittest.TestCase):
         self.assertEqual(glm_stage["configured_model"], "glm-5.3")
         self.assertEqual(glm_stage["ledger"]["request_count"], 2)
         self.assertEqual(glm_stage["known_cost_per_accepted_finding_micros"], 300)
+        archaeology = next(item for item in summary["stages"]
+                           if item["stage"] == "archaeologist")
+        self.assertTrue(archaeology["concept_stage"])
+        self.assertEqual(archaeology["conceptual_concerns"], 1)
+        self.assertEqual(archaeology["accepted_findings"], 0)
+        self.assertEqual(archaeology["ledger"]["known_cost_micros"], 50)
 
         review = next(item for item in summary["reviews"]
                       if item["job_id"] == reviewed["id"])
         self.assertEqual(review["job_id"], reviewed["id"])
         self.assertEqual(review["report_name"], report_name)
-        self.assertEqual(review["ledger"]["known_cost_micros"], 550)
+        self.assertEqual(review["ledger"]["known_cost_micros"], 600)
         self.assertEqual(review["ledger"]["reserved_micros"], 1200)
-        self.assertEqual(review["tokens"]["input"], 310)
+        self.assertEqual(review["tokens"]["input"], 350)
+        self.assertTrue(review["archaeology"]["research_completed"])
+        self.assertTrue(review["archaeology"]["published_concern"])
+        self.assertEqual(review["archaeology"]["status"], "verified")
+        self.assertEqual(review["archaeology"]["citation_count"], 1)
+        self.assertEqual(review["archaeology"]["alternative_count"], 1)
         self.assertEqual(summary["paired_sol_glm"]["completed_pairs"], 1)
         self.assertEqual(summary["paired_sol_glm"]["shared_accepted"]["adversarial_glm"], 1)
 
@@ -444,6 +503,17 @@ class StatsTests(unittest.TestCase):
                 },
             },
         }
+
+    def test_research_outcomes_and_publication_are_counted_separately(self):
+        overview = {"archaeology": {"research_completed": 0, "saved_concerns": 0,
+                                    "published_concerns": 0, "assessment_status_counts": {}}}
+        stats._add_archaeology_counts(overview, True,
+            {"status": "no_concern", "published_concern": False}, True)
+        stats._add_archaeology_counts(overview, True,
+            {"status": "verified", "published_concern": True}, False)
+        self.assertEqual(overview["archaeology"], {
+            "research_completed": 2, "saved_concerns": 1, "published_concerns": 0,
+            "assessment_status_counts": {"no_concern": 1, "verified": 1}})
 
 
 if __name__ == "__main__":

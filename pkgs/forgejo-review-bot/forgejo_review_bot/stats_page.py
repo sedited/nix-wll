@@ -167,6 +167,7 @@ def _analysis(summary):
     month = _mapping(spend.get("current_month"))
     lifetime = _mapping(spend.get("lifetime"))
     saved_reviews = _field(overview, "saved_reviews")
+    archaeology = _mapping(overview.get("archaeology"))
     unique_prs = _field(inventory, "unique_prs")
     jobs = _field(inventory, "jobs_total")
     attempts = _field(lifetime, "request_count")
@@ -175,7 +176,8 @@ def _analysis(summary):
     if _number(saved_reviews):
         sentence = (
             f"{_fmt_int(saved_reviews)} saved reviews; {_fmt_int(unique_prs)} pull requests have been queued. "
-            f"current month known spend is {_fmt_money_micros(known)}."
+            f"{_fmt_int(_field(archaeology, 'research_completed'))} completed archaeology research. "
+            f"Current month known spend is {_fmt_money_micros(known)}."
         )
     else:
         sentence = "No saved reviews are in this summary yet."
@@ -206,6 +208,7 @@ def _top_kpis(summary):
     saved_reviews = _field(overview, "saved_reviews")
     unique_prs = _field(inventory, "unique_prs")
     findings = _field(overview, "published_findings")
+    archaeology = _mapping(overview.get("archaeology"))
     known = _field(month, "known_cost_micros")
     reserved = _field(month, "reserved_micros")
     review_costs = _mapping(_mapping(summary.get("distributions")).get(
@@ -219,6 +222,8 @@ def _top_kpis(summary):
     return "".join([
         _kpi("Saved reviews", _fmt_int(saved_reviews), f"{_fmt_int(unique_prs)} unique PRs"),
         _kpi("Verified findings", _fmt_int(findings), "Bot verified, not human confirmed"),
+        _kpi("Conceptual concerns", _fmt_int(_field(archaeology, "published_concerns")),
+             f"{_fmt_int(_field(archaeology, 'research_completed'))} research runs"),
         _kpi("Current month spend", _fmt_money_micros(known),
              f"{_fmt_money_micros(reserved)} reserved, {provider_count} providers"),
         _kpi("Median review cost", _fmt_money_micros(median_review_cost),
@@ -248,6 +253,49 @@ def _coverage_table(summary):
         for name, value in sorted(coverage.items())
     )
     return f"<table><thead><tr><th>Status</th><th>Reviews</th></tr></thead><tbody>{rows}</tbody></table>"
+
+
+def _concept_section(summary):
+    archaeology = _mapping(_mapping(summary.get("overview")).get("archaeology"))
+    by_status = _mapping(archaeology.get("assessment_status_counts"))
+    distributions = _mapping(summary.get("distributions"))
+    citation_counts = _mapping(distributions.get(
+        "saved_review_conceptual_concern_citations"))
+    alternative_counts = _mapping(distributions.get(
+        "saved_review_conceptual_concern_alternatives"))
+    if not archaeology:
+        body = "<p>No archaeology counts were recorded.</p>"
+    else:
+        rows = "".join(
+            f"<tr><td>{_escape(status)}</td><td>{_fmt_int(count)}</td></tr>"
+            for status, count in sorted(by_status.items())
+        )
+        status_table = (
+            "<p>No conceptual assessment statuses were recorded.</p>" if not rows else
+            "<table><thead><tr><th>Status</th><th>Reviews</th></tr></thead>"
+            f"<tbody>{rows}</tbody></table>"
+        )
+        body = (
+            f"<p>{_fmt_int(_field(archaeology, 'research_completed'))} saved reviews "
+            "completed archaeology research; "
+            f"{_fmt_int(_field(archaeology, 'saved_concerns'))} saved and "
+            f"{_fmt_int(_field(archaeology, 'published_concerns'))} published "
+            "a conceptual concern.</p>"
+            + status_table
+            + "<p class=\"note\">"
+            f"Median citations: {_fmt_decimal(_field(citation_counts, 'median'))}; "
+            f"median alternatives: {_fmt_decimal(_field(alternative_counts, 'median'))}."
+            "</p>"
+        )
+    return (
+        '<section id="concepts"><h2>Conceptual concerns</h2>'
+        + _section_note(
+            "The archaeology pass can complete without publishing a concern. "
+            "Published conceptual concerns are tracked separately from code findings."
+        )
+        + body
+        + '</section>'
+    )
 
 
 def _spend_rows(records):
@@ -337,6 +385,7 @@ def _stage_section(summary):
                 f"<td>{_escape(_field(stage, 'configured_model', default='unknown'))}</td>"
                 f"<td>{_fmt_int(_field(stage, 'executed_runs'))}</td>"
                 f"<td>{_fmt_int(_field(stage, 'saved_result_runs'))}</td>"
+                f"<td>{_fmt_int(_field(stage, 'conceptual_concerns'))}</td>"
                 f"<td>{_fmt_int(_field(stage, 'accepted_findings'))}</td>"
                 f"<td>{_fmt_int(_field(stage, 'sole_source_findings'))}</td>"
                 f"<td>{_fmt_int(_field(stage, 'shared_findings'))}</td>"
@@ -351,7 +400,7 @@ def _stage_section(summary):
             )
         body = (
             "<table><thead><tr><th>Stage</th><th>Configured model</th><th>Executed runs</th>"
-            "<th>Saved runs</th><th>Accepted</th><th>Sole</th><th>Shared</th>"
+            "<th>Saved runs</th><th>Conceptual concerns</th><th>Accepted</th><th>Sole</th><th>Shared</th>"
             "<th>Publish / drop / unresolved / undisposed</th><th>Selected among assessed</th>"
             "<th>Accepted findings/run</th><th>Attempts</th>"
             "<th>Known cost</th><th>Cost/accepted</th></tr></thead>"
@@ -361,7 +410,7 @@ def _stage_section(summary):
         '<section id="stages"><h2>Agent stages</h2>'
         + _section_note(
             "Opportunities and accepted findings describe observed attribution in saved review results. "
-            "Cost comes from ledger stage and model attempts, including reruns. Selected rates use publish, drop and unresolved candidates; unassessed candidates are excluded."
+            "Conceptual concerns are counted separately from findings. Cost comes from ledger stage and model attempts, including reruns. Selected rates use publish, drop and unresolved candidates; unassessed candidates are excluded."
         )
         + body
         + '</section>'
@@ -520,6 +569,8 @@ def _distribution_section(summary):
         "saved_review_reserved_micros": "Saved review reserved",
         "saved_review_tools": "Tool calls",
         "saved_review_model_seconds": "Model seconds",
+        "saved_review_conceptual_concern_citations": "Conceptual concern citations",
+        "saved_review_conceptual_concern_alternatives": "Conceptual concern alternatives",
     }
     rows = []
     for key, label in labels.items():
@@ -555,7 +606,18 @@ def _reviews_section(summary, repository_url, report_base_url):
         rows = []
         for review in reviews:
             findings = _mapping(review.get("findings"))
+            archaeology = _mapping(review.get("archaeology"))
             ledger = _mapping(review.get("ledger"))
+            if archaeology.get("published_concern"):
+                concept_status = (
+                    f"{_escape(_field(archaeology, 'status', default='unknown'))} "
+                    f"({_fmt_int(_field(archaeology, 'citation_count'))} citations, "
+                    f"{_fmt_int(_field(archaeology, 'alternative_count'))} alternatives)"
+                )
+            elif archaeology.get("research_completed"):
+                concept_status = "research complete; no concern"
+            else:
+                concept_status = "N/A"
             rows.append(
                 "<tr>"
                 f"<td>{_fmt_int(_field(review, 'job_id'))}</td>"
@@ -565,6 +627,7 @@ def _reviews_section(summary, repository_url, report_base_url):
                 f"<td>{_escape(_field(review, 'status', default='saved'))}</td>"
                 f"<td>{_escape(_field(review, 'coverage', default='unknown'))}</td>"
                 f"<td>{_fmt_int(findings.get('saved'))} / {_fmt_int(findings.get('published'))}</td>"
+                f"<td>{concept_status}</td>"
                 f"<td>{_fmt_int(_field(ledger, 'request_count'))}</td>"
                 f"<td>{_fmt_int(_field(review, 'recorded_failed_attempts'))}</td>"
                 f"<td>{_fmt_money_micros(_field(ledger, 'known_cost_micros'))}</td>"
@@ -574,7 +637,7 @@ def _reviews_section(summary, repository_url, report_base_url):
         body = (
             "<table><thead><tr><th>Job</th><th>PR</th><th>Generation</th><th>Report</th>"
             "<th>Status</th><th>Coverage</th><th>Findings saved/published</th>"
-            "<th>Attempts</th><th>Failed/retries</th><th>Known cost</th><th>Reserved</th></tr></thead>"
+            "<th>Concept</th><th>Attempts</th><th>Failed/retries</th><th>Known cost</th><th>Reserved</th></tr></thead>"
             f"<tbody>{''.join(rows)}</tbody></table>"
         )
     return '<section id="reviews"><h2>Latest reviews</h2>' + body + '</section>'
@@ -644,6 +707,7 @@ def _html(summary, repository_url, report_base_url):
 <p class="meta">Generated {_escape(generated_at)}. {_escape(_source_status(summary))}</p>
 <nav>
 <a href="#leaderboard">Leaderboard</a>
+<a href="#concepts">Concepts</a>
 <a href="#spend">Spend</a>
 <a href="#stages">Agent stages</a>
 <a href="#paired">Paired models</a>
@@ -656,6 +720,7 @@ def _html(summary, repository_url, report_base_url):
 <main>
 <div class="cards">{_top_kpis(summary)}</div>
 {_leaderboard_section(summary)}
+{_concept_section(summary)}
 {_paired_section(summary)}
 <section id="coverage"><h2>Coverage snapshot</h2>
 {_section_note("Bot verification is a consistency check against available evidence, not human confirmation.")}

@@ -27,6 +27,19 @@ class ReportTests(unittest.TestCase):
             "review_input_sha256": "hash",
             "private_state": {"token": "credential-marker"},
             "coverage": {"status": "partial", "limitations": ["Verification was partial."]},
+            "concept_assessment": {
+                "status": "verified",
+                "stage": "archaeologist",
+                "summary": "Fix it in the policy layer. Sources: [1](https://code.example.org/bitcoin/bitcoin/pulls/1#issuecomment-2)",
+                "private": "concept-private-marker",
+                "candidate": self.concept_brief(),
+                "verification": {
+                    "disposition": "publish",
+                    "reason": "History supports publishing this concern.",
+                    "assessment": self.concept_brief(),
+                    "private": "verification-private-marker",
+                },
+            },
             "candidate_sources": {"tests:1": "tests"},
             "decisions": [{
                 "candidate_ids": ["tests:1"],
@@ -83,10 +96,45 @@ class ReportTests(unittest.TestCase):
                         "output": "private tool output marker",
                         "output_bytes": 50,
                         "output_sha256": "a" * 64,
+                        "hosted": True,
+                        "action_type": "search",
+                        "retrieved_at": "2026-10-01T00:00:00Z",
+                        "sources": [
+                            "https://code.example.org/source",
+                            "javascript:alert(1)",
+                            "https://[",
+                        ],
                     }],
                     "private": "stage-private-marker",
                 }
             },
+        }
+
+    def concept_brief(self):
+        return {
+            "problem": "The PR changes peer eviction policy.",
+            "baseline": "Leave the old eviction behavior alone.",
+            "delivered_benefit": "Makes one operator workflow cheaper.",
+            "relevant_history": "Earlier attempts stalled on unclear deployment impact.",
+            "recommendation": "Use the submitted concept only if the history still applies.",
+            "decisive_question": "Do current deployments still hit the old failure mode?",
+            "technical_assumptions": ["The verifier still needs to check the policy path."],
+            "alternatives": [{
+                "name": "Do nothing",
+                "provenance": "history",
+                "concept": "Keep the existing policy.",
+                "benefit": "No churn",
+                "cost": "Known operator pain remains",
+                "unresolved": "Whether the old pain still matters.",
+                "citations": ["https://code.example.org/bitcoin/bitcoin/pulls/2"],
+                "private": "alternative-private-marker",
+            }],
+            "citations": [
+                "https://code.example.org/bitcoin/bitcoin/pulls/1#issuecomment-2",
+                "javascript:alert(1)",
+                "https://[",
+            ],
+            "private": "source-private-marker",
         }
 
     def save(self, directory, debug=None, content="Verified review text."):
@@ -137,6 +185,29 @@ class ReportTests(unittest.TestCase):
         self.assertIn('{\n  &quot;coverage&quot;: {', html)
         self.assertIn("Raw full reply", html)
 
+    def test_concept_assessment_renders_without_becoming_a_finding(self):
+        with tempfile.TemporaryDirectory() as directory:
+            html_name = self.save(directory)
+            public = json.loads((Path(directory) / "123-abcdef.json").read_text())
+            html = (Path(directory) / html_name).read_text()
+
+        assessment = public["concept_assessment"]
+        self.assertEqual(assessment["status"], "verified")
+        self.assertEqual(assessment["verification"]["disposition"], "publish")
+        self.assertEqual(assessment["verification"]["assessment"]["alternatives"][0]["name"],
+                         "Do nothing")
+        self.assertEqual(
+            assessment["verification"]["assessment"]["alternatives"][0]["concept"],
+            "Keep the existing policy.")
+        self.assertEqual(len(public["finding_attribution"]), 1)
+        self.assertIn("Concept and Approach", html)
+        self.assertIn("Earlier attempts stalled on unclear deployment impact.", html)
+        self.assertIn(
+            'href="https://code.example.org/bitcoin/bitcoin/pulls/1#issuecomment-2"',
+            html)
+        self.assertNotIn('href="javascript:', html)
+        self.assertNotIn('href="https://["', html)
+
     def test_report_escapes_hostile_markup(self):
         raw = "</pre><script>alert('x')</script><pre>"
         content = "Verified </pre><script>alert('review')</script>"
@@ -165,6 +236,10 @@ class ReportTests(unittest.TestCase):
             "stage-private-marker",
             "decision-private-marker",
             "attribution-private-marker",
+            "concept-private-marker",
+            "alternative-private-marker",
+            "source-private-marker",
+            "verification-private-marker",
             "review_input_sha256",
         ):
             self.assertNotIn(private, public_text)
@@ -172,7 +247,15 @@ class ReportTests(unittest.TestCase):
         public = json.loads(public_text)
         self.assertEqual(public["review"], "Verified review text.")
         self.assertEqual(public["metrics"]["tool_calls"], 1)
-        self.assertNotIn("tools", public["stages"]["tests"])
+        self.assertEqual(public["stages"]["tests"]["tools"], [{
+            "name": "read_file",
+            "output_bytes": 50,
+            "output_sha256": "a" * 64,
+            "hosted": True,
+            "action_type": "search",
+            "retrieved_at": "2026-10-01T00:00:00Z",
+            "sources": ["https://code.example.org/source"],
+        }])
 
     def test_files_are_public_readable_and_named_from_report_id(self):
         with tempfile.TemporaryDirectory() as directory:
