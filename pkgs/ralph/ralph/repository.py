@@ -32,8 +32,14 @@ def collect_review(checkout, number, base_ref, expected_head, title, description
     prepare_checkout(checkout, bot_config)
     base_fetch_ref = f"{ref_prefix}/base"
     head_fetch_ref = f"{ref_prefix}/head"
+    if base_ref.startswith("sha:"):
+        base_source = base_ref.removeprefix("sha:")
+        if not SHA.fullmatch(base_source):
+            raise ValueError("invalid historical base")
+    else:
+        base_source = f"refs/heads/{base_ref}"
     git(checkout, "fetch", "--no-tags", "--filter=blob:none", "origin",
-        f"+refs/heads/{base_ref}:{base_fetch_ref}",
+        f"+{base_source}:{base_fetch_ref}",
         f"+refs/pull/{number}/head:{head_fetch_ref}")
     actual_head = git(checkout, "rev-parse", head_fetch_ref).strip()
     base_sha = git(checkout, "rev-parse", base_fetch_ref).strip()

@@ -186,6 +186,12 @@ systemctl start ralph-stats.service
 
 To force a fresh review of the same head, send a signed synthetic pull request
 webhook with `"ralph_force": true`. Normal Forgejo webhooks omit this field.
+For a historical review, also supply `pull_request.base.sha` with the recorded
+base commit. Merged PRs use the merge commit's first parent; closed, unmerged
+PRs use their recorded base SHA. Only forced requests honor this field. Open
+PRs omit it so the worker fetches the current target branch. Every review uses
+`merge-base(base, head)..head` for its patch and file tools. Historical reviews
+remain retrospective: discussion and web research are not time-filtered.
 A forced review receives a new allowance. Changing prompts does not
 automatically rerun previously reviewed heads.
 

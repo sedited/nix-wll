@@ -441,6 +441,19 @@ class WebhookTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             service.parse_event(self.bot_config, "pull_request", wrong)
 
+    def test_historical_base_requires_force_and_valid_sha(self):
+        event = payload()
+        event["pull_request"]["base"]["sha"] = "b" * 40
+        self.assertEqual(service.parse_event(self.bot_config, "pull_request", event)[1],
+                         "master")
+        event["ralph_force"] = True
+        self.assertEqual(service.parse_event(self.bot_config, "pull_request", event)[1],
+                         "sha:" + "b" * 40)
+        for invalid in (None, "master", "-option", "b" * 39):
+            event["pull_request"]["base"]["sha"] = invalid
+            with self.assertRaisesRegex(ValueError, "historical base"):
+                service.parse_event(self.bot_config, "pull_request", event)
+
     def test_webhook_queues_only_authenticated_target_event(self):
         jobs = CapturingJobs()
         server = ThreadingHTTPServer(("127.0.0.1", 0), service.make_handler(b"secret", jobs, self.bot_config))

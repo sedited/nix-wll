@@ -54,6 +54,11 @@ def parse_event(bot_config, event, payload):
         raise ValueError("invalid or unexpected pull request payload")
     if not isinstance(force, bool):
         raise ValueError("invalid review override")
+    if force and "sha" in base:
+        historical_base = base["sha"]
+        if not isinstance(historical_base, str) or not SHA.fullmatch(historical_base):
+            raise ValueError("invalid historical base")
+        base_ref = f"sha:{historical_base}"
     return number, base_ref, head_sha, payload["action"], force
 
 def requeue_latest_head(jobs, bot_config, number, base_ref, expected_head, action, force):

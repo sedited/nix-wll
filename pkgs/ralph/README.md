@@ -18,7 +18,7 @@ flowchart TD
     event["Forgejo PR opened, reopened or synchronized"] --> webhook["Webhook server: validate signature and repository"]
     webhook --> queue["Durable SQLite queue: coalesce newer heads"]
     queue --> workers["Review workers: default 3 concurrent PRs"]
-    workers --> collect["Fetch refs and collect immutable base/head snapshot"]
+    workers --> collect["Fetch current branch or pinned historical base and collect merge-base/head snapshot"]
     collect --> existing{"Same base and head already reviewed?"}
     existing -->|yes| done["Complete without model calls"]
     existing -->|no| pipeline["Route, discover, research, verify and edit"]

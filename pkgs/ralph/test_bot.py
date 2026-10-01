@@ -120,6 +120,47 @@ class BotTests(unittest.TestCase):
         self.assertIn("PR description:\nWhy this change is needed", result[2])
         self.assertIn(("diff", "--no-ext-diff", "--binary", f"{merge_base}..{head}"), calls)
 
+    def test_historical_review_after_merge_uses_pinned_base(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            origin, work, checkout = (root / name for name in ("origin.git", "work", "checkout"))
+            repository.git(root, "init", "--bare", str(origin))
+            repository.git(root, "init", str(work))
+            repository.git(work, "config", "user.name", "Test")
+            repository.git(work, "config", "user.email", "test@example.com")
+            repository.git(work, "remote", "add", "origin", str(origin))
+            path = work / "code.cpp"
+            path.write_text("original behavior\n")
+            repository.git(work, "add", ".")
+            repository.git(work, "commit", "-qm", "Base")
+            ancestor = repository.git(work, "rev-parse", "HEAD").strip()
+            path.write_text("PR behavior\n")
+            repository.git(work, "commit", "-qam", "PR")
+            head = repository.git(work, "rev-parse", "HEAD").strip()
+            repository.git(work, "push", "origin", "HEAD:refs/pull/42/head")
+            repository.git(work, "checkout", "-b", "target", ancestor)
+            (work / "unrelated.cpp").write_text("target branch change\n")
+            repository.git(work, "add", ".")
+            repository.git(work, "commit", "-qm", "Target advanced before merge")
+            historical_base = repository.git(work, "rev-parse", "HEAD").strip()
+            repository.git(work, "merge", "--no-ff", head, "-m", "Merge PR")
+            repository.git(work, "push", "origin", "HEAD:refs/heads/master")
+            bot_config = replace(self.bot_config, origin=str(origin))
+            current = repository.collect_review(checkout, 42, "master", head,
+                "Title", "Description", bot_config)
+            self.assertNotIn("diff --git", current[2])
+            for base in (ancestor, historical_base):
+                historical = repository.collect_review(checkout, 42, f"sha:{base}", head,
+                    "Title", "Description", bot_config)
+                self.assertIsNone(historical[3])
+                self.assertIn("+PR behavior", historical[2])
+                self.assertNotIn("unrelated.cpp", historical[2])
+                snapshot = repository.snapshot_repository(checkout, historical[0], historical[1])
+                self.assertEqual(snapshot.merge_base, ancestor)
+                self.assertEqual(set(snapshot.changed_paths), {"code.cpp"})
+                self.assertIn("original behavior", repository.read_file(
+                    checkout, snapshot.base_files, "code.cpp", 1))
+
     def test_concurrent_review_refs_preserve_pinned_snapshots(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
