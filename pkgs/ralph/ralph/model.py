@@ -6,7 +6,7 @@ import time
 import urllib.error
 import urllib.request
 
-from . import forgejo
+from . import forgejo, research
 from .repository import (find_paths, read_file, read_diff, search_code, blame_base,
                          read_commit)
 from .spend import BudgetExceeded, web_search_calls
@@ -87,6 +87,16 @@ TOOLS = [
          "commit": {"type": "string", "description": "Full commit SHA from blame_base"},
          "path": {"type": "string", "description": "Repository-relative file path"}},
          "required": ["commit", "path"], "additionalProperties": False}},
+    {"type": "function", "name": "find_base_paths", "strict": True,
+     "description": "Find tracked file paths at the pinned PR merge base, before the change.",
+     "parameters": {"type": "object", "properties": {
+         "query": {"type": "string"}},
+         "required": ["query"], "additionalProperties": False}},
+    {"type": "function", "name": "search_base_code", "strict": True,
+     "description": "Search tracked text at the pinned PR merge base for a literal string.",
+     "parameters": {"type": "object", "properties": {
+         "query": {"type": "string"}},
+         "required": ["query"], "additionalProperties": False}},
 ]
 PR_DISCUSSION_TOOLS = [
     {"type": "function", "name": "read_current_pr_discussion", "strict": True,
@@ -114,8 +124,9 @@ PR_DISCUSSION_TOOLS = [
                     "additionalProperties": False}},
 ]
 FOCUSED_TOOLS = TOOLS[:5]
-ARCHAEOLOGY_TOOLS = [tool for tool in TOOLS if tool["name"] in {
-    "search_discussions", "read_discussion"}] + PR_DISCUSSION_TOOLS + [WEB_SEARCH_TOOL]
+BASE_TOOLS = [tool for tool in TOOLS if tool["name"] in {
+    "find_base_paths", "read_base_file", "search_base_code"}]
+ARCHAEOLOGY_TOOLS = list(TOOLS) + PR_DISCUSSION_TOOLS + [WEB_SEARCH_TOOL]
 VERIFIER_TOOLS = list(TOOLS) + PR_DISCUSSION_TOOLS + [WEB_SEARCH_TOOL]
 LIVE_RESEARCH_TOOL_NAMES = {"search_discussions", "read_discussion",
                             "read_current_pr_discussion", "read_github_discussion"}
@@ -123,6 +134,15 @@ FINISH_WITH_AVAILABLE_EVIDENCE = (
     "Budget is near the review limit. Do not call tools. Finish now with the "
     "evidence already available, and preserve uncertainty for any claim that "
     "still lacks decisive support.")
+
+
+def available_tools(tools, allow_discussions=True, research_evidence=None):
+    """Frozen research may expose discussion readers, but never live web search."""
+    return [tool for tool in tools
+            if not (tool.get("type") in WEB_SEARCH_TOOL_TYPES
+                    and (not allow_discussions or research_evidence is not None))
+            and not (tool.get("name") in LIVE_RESEARCH_TOOL_NAMES
+                     and not allow_discussions and research_evidence is None)]
 
 class StaleReview(Exception):
     """The review no longer targets the current pull request head."""
@@ -284,14 +304,12 @@ def openai_review(api_key, review, snapshot, bot_config, prompt_config, debug=No
                   max_output_tokens=MAX_OUTPUT_TOKENS, stage_name="independent",
                   on_response=None, budget=None, response_schema=None,
                   reasoning_effort="low", allow_discussions=True,
-                  is_current=None, api_base="https://api.openai.com/v1"):
+                  is_current=None, api_base="https://api.openai.com/v1",
+                  research_evidence=None):
     prompt = prompt_config.instructions if prompt is None else prompt
     model = prompt_config.models["independent"] if model is None else model
-    tools = TOOLS if tools is None else tools
-    if not allow_discussions:
-        tools = [tool for tool in tools
-                 if tool.get("name") not in LIVE_RESEARCH_TOOL_NAMES
-                 and tool.get("type") not in WEB_SEARCH_TOOL_TYPES]
+    tools = available_tools(TOOLS if tools is None else tools,
+                            allow_discussions, research_evidence)
     allowed_tools = {tool["name"] for tool in tools if tool.get("type") == "function"}
     checkout = snapshot.checkout
     files = snapshot.head_files
@@ -453,6 +471,8 @@ def openai_review(api_key, review, snapshot, bot_config, prompt_config, debug=No
                             answer = "Unknown or unavailable tool."
                         elif call["name"] == "find_paths":
                             answer = find_paths(files, args.get("query"))
+                        elif call["name"] == "find_base_paths":
+                            answer = find_paths(snapshot.base_files, args.get("query"))
                         elif call["name"] == "read_file":
                             answer = read_file(checkout, files, args.get("path"),
                                                args.get("start_line"))
@@ -465,6 +485,8 @@ def openai_review(api_key, review, snapshot, bot_config, prompt_config, debug=No
                                                args.get("path"), args.get("start_line"))
                         elif call["name"] == "search_code":
                             answer = search_code(checkout, snapshot.head_sha, args.get("query"))
+                        elif call["name"] == "search_base_code":
+                            answer = search_code(checkout, snapshot.merge_base, args.get("query"))
                         elif call["name"] in LIVE_RESEARCH_TOOL_NAMES:
                             if current_pr is None:
                                 answer = "Discussion lookup unavailable without the current PR number."
@@ -472,7 +494,9 @@ def openai_review(api_key, review, snapshot, bot_config, prompt_config, debug=No
                                 answer = "Discussion lookup limit reached."
                             else:
                                 context_calls += 1
-                                if call["name"] == "search_discussions":
+                                if research_evidence is not None:
+                                    answer = research.lookup(research_evidence, call["name"], args)
+                                elif call["name"] == "search_discussions":
                                     answer = forgejo.search_discussions(bot_config, args.get("query"), current_pr)
                                 elif call["name"] == "read_discussion":
                                     answer = forgejo.read_discussion(bot_config, args.get("number"), current_pr)
@@ -515,8 +539,11 @@ def openai_review(api_key, review, snapshot, bot_config, prompt_config, debug=No
                         "output_sha256": hashlib.sha256(answer.encode()).hexdigest(),
                     }
                     if call.get("name") in LIVE_RESEARCH_TOOL_NAMES and not skipped:
-                        tool_record["retrieved_at"] = time.strftime(
-                            "%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                        if research_evidence is not None:
+                            tool_record["frozen"] = True
+                        else:
+                            tool_record["retrieved_at"] = time.strftime(
+                                "%Y-%m-%dT%H:%M:%SZ", time.gmtime())
                     if skipped:
                         tool_record["skipped"] = "inspection_limit"
                     debug["tools"].append(tool_record)

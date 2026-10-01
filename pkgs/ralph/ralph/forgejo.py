@@ -16,6 +16,47 @@ def _retrieved_at():
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace(
         "+00:00", "Z")
 
+
+def _parse_time(value):
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed
+
+
+def _visible_before_cutoff(record, cutoff):
+    if cutoff is None:
+        return True
+    cutoff_time = _parse_time(cutoff)
+    if cutoff_time is None or not isinstance(record, dict):
+        return False
+    timestamps = [
+        _parse_time(record.get(field))
+        for field in ("created_at", "updated_at", "submitted_at")
+        if record.get(field)
+    ]
+    if not timestamps:
+        return False
+    return all(moment is not None and moment <= cutoff_time for moment in timestamps)
+
+
+def _discussion_title_body(issue, cutoff, body_limit):
+    if _visible_before_cutoff(issue, cutoff):
+        title = str(issue.get("title") or "")[:300]
+        raw_body = str(issue.get("body") or "")
+        body = raw_body[:body_limit]
+        if len(raw_body) > body_limit:
+            body += "\n[Description truncated]"
+        return title, body
+    return ("[title unavailable before cutoff]",
+            "Description unavailable because current metadata is after the cutoff or incomplete.")
+
+
 def forgejo_request(bot_config, token, path, method="GET", data=None):
     headers = {"Authorization": f"token {token}", "Accept": "application/json",
                "User-Agent": "ralph/1.0"}
@@ -41,7 +82,7 @@ def public_discussion_request(bot_config, path):
         raise ValueError("Public discussion response exceeds context limit")
     return json.loads(content)
 
-def search_discussions(bot_config, query, current_pr):
+def search_discussions(bot_config, query, current_pr, cutoff=None):
     if (not isinstance(query, str) or not 3 <= len(query) <= 100
             or any(char in query for char in "\r\n\x00")):
         return "Search query must be 3 to 100 characters on one line."
@@ -55,7 +96,8 @@ def search_discussions(bot_config, query, current_pr):
     result = "Public issue and PR matches in this repository:\n"
     for issue in issues[:10]:
         if (not isinstance(issue, dict) or not isinstance(issue.get("number"), int)
-                or issue["number"] == current_pr):
+                or issue["number"] == current_pr
+                or not _visible_before_cutoff(issue, cutoff)):
             continue
         kind = "PR" if issue.get("pull_request") else "Issue"
         title = str(issue.get("title") or "").replace("\n", " ")[:200]
@@ -65,9 +107,11 @@ def search_discussions(bot_config, query, current_pr):
         if len((result + item).encode()) > MAX_TOOL_BYTES:
             return result + "[Results truncated]"
         result += item
-    return result if len(result.splitlines()) > 1 else "No matching discussions."
+    missing = "No matching discussions before cutoff." if cutoff else "No matching discussions."
+    return result if len(result.splitlines()) > 1 else missing
 
-def read_discussion(bot_config, number, current_pr):
+
+def read_discussion(bot_config, number, current_pr, cutoff=None):
     if (not isinstance(number, int) or isinstance(number, bool)
             or not 1 <= number <= 10_000_000):
         return "Invalid issue or PR number."
@@ -81,10 +125,10 @@ def read_discussion(bot_config, number, current_pr):
         return "Forgejo returned an invalid discussion."
     kind = "PR" if issue.get("pull_request") else "Issue"
     url_kind = "pulls" if kind == "PR" else "issues"
-    title = str(issue.get("title") or "")[:300]
-    body = str(issue.get("body") or "")[:3000]
+    title, body = _discussion_title_body(issue, cutoff, 3000)
     result = (f"{kind} #{number}: {title}\n"
               f"{bot_config.repository_url}/{url_kind}/{number}\n"
+              f"{'Cutoff' if cutoff else 'Retrieved at'}: {cutoff or _retrieved_at()}\n"
               f"Description:\n{body}\n")
     if len(result.encode()) > MAX_TOOL_BYTES:
         return (result.encode()[:MAX_TOOL_BYTES].decode(errors="replace")
@@ -97,8 +141,13 @@ def read_discussion(bot_config, number, current_pr):
         return result + "Forgejo returned invalid comments."
     human = [comment for comment in comments if isinstance(comment, dict)
              and bot_config.comment_marker not in str(comment.get("body") or "")]
-    selected = human[:2] + human[-6:] if len(human) > 8 else human
-    result += f"Selected comments ({len(selected)} of {len(human)}):\n"
+    visible = [comment for comment in human if _visible_before_cutoff(comment, cutoff)]
+    selected = visible[:2] + visible[-6:] if len(visible) > 8 else visible
+    suffix = " before cutoff" if cutoff else ""
+    result += f"Selected comments ({len(selected)} of {len(human)}{suffix}):\n"
+    omitted = len(human) - len(visible)
+    if omitted:
+        result += f"{omitted} comments were omitted because current metadata is after the cutoff or incomplete.\n"
     seen = set()
     for comment in selected:
         if comment.get("id") in seen:
@@ -126,13 +175,19 @@ def _is_bot_comment(comment, bot_config):
             or login.endswith("[bot]"))
 
 
-def _append_comments(result, comments, bot_config, *, limit=DISCUSSION_PAGE_LIMIT):
+def _append_comments(result, comments, bot_config, *, limit=DISCUSSION_PAGE_LIMIT,
+                     cutoff=None):
     if not isinstance(comments, list):
         return result + "Forgejo returned invalid comments.\n"
     human = [comment for comment in comments if isinstance(comment, dict)
              and not _is_bot_comment(comment, bot_config)]
-    selected = human[:limit]
-    result += f"Comments on this page ({len(selected)} of {len(human)} non-bot):\n"
+    visible = [comment for comment in human if _visible_before_cutoff(comment, cutoff)]
+    selected = visible[:limit]
+    suffix = " before cutoff" if cutoff else ""
+    result += f"Comments on this page ({len(selected)} of {len(human)} non-bot{suffix}):\n"
+    omitted = len(human) - len(visible)
+    if omitted:
+        result += f"{omitted} comments were omitted because current metadata is after the cutoff or incomplete.\n"
     seen = set()
     for comment in selected:
         if comment.get("id") in seen:
@@ -152,7 +207,8 @@ def _append_comments(result, comments, bot_config, *, limit=DISCUSSION_PAGE_LIMI
     return result
 
 
-def _public_discussion_page(bot_config, path, *, page, limit=DISCUSSION_PAGE_LIMIT):
+def _public_discussion_page(bot_config, path, *, page, limit=DISCUSSION_PAGE_LIMIT,
+                            cutoff=None):
     separator = "&" if "?" in path else "?"
     try:
         items = public_discussion_request(
@@ -164,14 +220,14 @@ def _public_discussion_page(bot_config, path, *, page, limit=DISCUSSION_PAGE_LIM
     return items, len(items) == limit
 
 
-def _slice_page(items, page, limit=DISCUSSION_PAGE_LIMIT):
+def _slice_page(items, page, limit=DISCUSSION_PAGE_LIMIT, cutoff=None):
     start = (page - 1) * limit
     selected = items[start:start + limit]
     return selected, len(items) > start + limit
 
 
 def read_current_pr_discussion(bot_config, number, kind="comments", page=1,
-                               review_id=0):
+                               review_id=0, cutoff=None):
     if (not isinstance(number, int) or isinstance(number, bool)
             or not 1 <= number <= 10_000_000):
         return "Invalid pull request number."
@@ -191,21 +247,19 @@ def read_current_pr_discussion(bot_config, number, kind="comments", page=1,
         return "Current PR discussion is unavailable or exceeds the context limit."
     if not isinstance(issue, dict) or issue.get("number") != number:
         return "Forgejo returned an invalid current PR discussion."
-    title = str(issue.get("title") or "")[:300]
-    raw_body = str(issue.get("body") or "")
-    body = raw_body[:4000] + ("\n[Description truncated]" if len(raw_body) > 4000 else "")
+    title, body = _discussion_title_body(issue, cutoff, 4000)
     result = (f"Current PR #{number}: {title}\n"
               f"{bot_config.repository_url}/pulls/{number}\n"
-              f"Retrieved at: {_retrieved_at()}\n"
+              f"{'Cutoff' if cutoff else 'Retrieved at'}: {cutoff or _retrieved_at()}\n"
               f"Description:\n{body}\n")
     if len(result.encode()) > MAX_TOOL_BYTES:
         return (result.encode()[:MAX_TOOL_BYTES].decode(errors="replace")
                 + "\n[Description truncated]\n")
     if kind == "comments":
         comments, truncated = _public_discussion_page(
-            bot_config, f"/issues/{number}/comments", page=page)
+            bot_config, f"/issues/{number}/comments", page=page, cutoff=cutoff)
         result += f"Issue comments page {page}:\n"
-        result = _append_comments(result, comments, bot_config)
+        result = _append_comments(result, comments, bot_config, cutoff=cutoff)
     elif kind == "inline":
         truncated = True
         try:
@@ -215,14 +269,14 @@ def read_current_pr_discussion(bot_config, number, kind="comments", page=1,
             comments = None
             truncated = True
         if isinstance(comments, list):
-            comments, truncated = _slice_page(comments, page)
+            comments, truncated = _slice_page(comments, page, cutoff=cutoff)
         result += f"Inline review comments for review {review_id}, page {page}:\n"
-        result = _append_comments(result, comments, bot_config)
+        result = _append_comments(result, comments, bot_config, cutoff=cutoff)
     else:
         reviews, truncated = _public_discussion_page(
-            bot_config, f"/pulls/{number}/reviews", page=page)
+            bot_config, f"/pulls/{number}/reviews", page=page, cutoff=cutoff)
         result += f"Pull review summaries page {page}:\n"
-        result = _append_comments(result, reviews, bot_config)
+        result = _append_comments(result, reviews, bot_config, cutoff=cutoff)
     if truncated:
         result += f"{kind} may continue on page {page + 1}.\n"
     return result
@@ -262,7 +316,7 @@ def _parse_github_issue_url(url):
     return owner, repo, number
 
 
-def _github_page(path, *, page, per_page=DISCUSSION_PAGE_LIMIT):
+def _github_page(path, *, page, per_page=DISCUSSION_PAGE_LIMIT, cutoff=None):
     separator = "&" if "?" in path else "?"
     try:
         items = _github_api(f"{path}{separator}per_page={per_page}&page={page}")
@@ -288,7 +342,7 @@ def _github_fragment_comment(base, fragment):
     return None, False
 
 
-def read_github_discussion(bot_config, url, kind="comments", page=1):
+def read_github_discussion(bot_config, url, kind="comments", page=1, cutoff=None):
     parsed = _parse_github_issue_url(url)
     if parsed is None:
         return "URL must be a public GitHub pull or issue URL."
@@ -304,33 +358,34 @@ def read_github_discussion(bot_config, url, kind="comments", page=1):
         issue = _github_api(f"{base}/issues/{number}")
     except (ValueError, urllib.error.HTTPError, urllib.error.URLError, TimeoutError):
         return "GitHub discussion is unavailable or exceeds the context limit."
-    title = str(issue.get("title") or "")[:300] if isinstance(issue, dict) else ""
-    raw_body = str(issue.get("body") or "") if isinstance(issue, dict) else ""
-    body = raw_body[:4000] + ("\n[Description truncated]" if len(raw_body) > 4000 else "")
+    if not isinstance(issue, dict):
+        issue = {}
+    issue.setdefault("number", number)
+    title, body = _discussion_title_body(issue, cutoff, 4000)
     result = (f"GitHub discussion {owner}/{repo} #{number}: {title}\n"
               f"https://github.com/{owner}/{repo}/pull/{number}\n"
-              f"Retrieved at: {_retrieved_at()}\n"
+              f"{'Cutoff' if cutoff else 'Retrieved at'}: {cutoff or _retrieved_at()}\n"
               f"Description:\n{body}\n")
     fragment_comment, had_fragment = _github_fragment_comment(base, fragment)
     if had_fragment:
         result += "GitHub referenced comment:\n"
         result = _append_comments(
             result, [fragment_comment] if isinstance(fragment_comment, dict) else None,
-            bot_config)
+            bot_config, cutoff=cutoff)
         return result
     if kind == "comments":
         comments, truncated = _github_page(
-            f"{base}/issues/{number}/comments", page=page)
+            f"{base}/issues/{number}/comments", page=page, cutoff=cutoff)
         result += f"GitHub issue comments page {page}:\n"
     elif kind == "inline":
         comments, truncated = _github_page(
-            f"{base}/pulls/{number}/comments", page=page)
+            f"{base}/pulls/{number}/comments", page=page, cutoff=cutoff)
         result += f"GitHub inline review comments page {page}:\n"
     else:
         comments, truncated = _github_page(
-            f"{base}/pulls/{number}/reviews", page=page)
+            f"{base}/pulls/{number}/reviews", page=page, cutoff=cutoff)
         result += f"GitHub review summaries page {page}:\n"
-    result = _append_comments(result, comments, bot_config)
+    result = _append_comments(result, comments, bot_config, cutoff=cutoff)
     if truncated:
         result += f"GitHub {kind} may continue on page {page + 1}.\n"
     return result
