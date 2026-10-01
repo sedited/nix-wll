@@ -30,8 +30,9 @@ FINDING_FIELDS = ("kind", "severity", "path", "line", "side", "title", "body")
 CANDIDATE_FIELDS = ("kind", "path", "line", "side", "title", "claim", "consequence",
                     "evidence", "correction", "uncertainty")
 TOOL_FIELDS = ("name", "output_bytes", "output_sha256", "skipped", "hosted",
-               "action_type", "retrieved_at")
-CONCEPT_FIELDS = ("status", "stage", "model", "problem", "baseline",
+               "action_type", "retrieved_at", "frozen")
+CONCEPT_FIELDS = ("status", "stage", "model", "problem", "goal", "baseline",
+                  "assessment", "proposed_review", "review_reason",
                   "delivered_benefit", "relevant_history", "recommendation",
                   "decisive_question", "technical_assumptions")
 CONCEPT_ALTERNATIVE_FIELDS = ("name", "concept", "benefit", "cost", "unresolved",
@@ -227,7 +228,7 @@ def _public_concept_assessment(debug):
     verified = None
     if isinstance(verification, dict):
         public_verification = {}
-        for key in ("disposition", "reason"):
+        for key in ("disposition", "reason", "proposed_review", "review_reason"):
             if isinstance(verification.get(key), str):
                 public_verification[key] = verification[key]
         verified = _public_concept_brief(verification.get("assessment"))
@@ -389,13 +390,24 @@ def _concept_assessment_html(assessment):
         ("status", "Status"),
         ("summary", "Published summary"),
     ))
+    candidate = assessment.get("candidate") or {}
+    if candidate.get("proposed_review") or verification.get("proposed_review"):
+        body += "<p>Review recommendations are advisory and do not stop code review.</p>"
+        body += _paragraphs(candidate, (
+            ("assessment", "Initial concept assessment"),
+            ("proposed_review", "Initial review recommendation"),
+            ("review_reason", "Initial review reason"),
+        ))
     body += _paragraphs(verification, (
         ("disposition", "Verifier disposition"),
         ("reason", "Verifier reason"),
+        ("proposed_review", "Verified review recommendation"),
+        ("review_reason", "Verified review reason"),
     ))
     body += _paragraphs(brief, (
         ("recommendation", "Recommendation"),
         ("problem", "Problem"),
+        ("goal", "Higher-level goal"),
         ("baseline", "Baseline"),
         ("delivered_benefit", "Delivered benefit"),
         ("relevant_history", "Relevant history"),

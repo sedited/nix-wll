@@ -74,10 +74,15 @@ def published_concept_assessment(debug):
     return None
 
 
+def published_concept_concern(debug):
+    assessment = published_concept_assessment(debug)
+    return assessment is not None and assessment.get("assessment") != "worth_pursuing"
+
+
 def _new_stage_metrics(name, stage):
     record = {"model": stage.get("model"),
               "status": stage.get("status", "unknown"),
-              "concept_stage": name == "archaeologist",
+              "concept_stage": name in {"archaeologist", "alternatives"},
               "conceptual_concerns": 0,
               "calls": len(stage.get("turns", [])),
               "tool_calls": len(stage.get("tools", [])),
@@ -98,7 +103,7 @@ def stage_metrics(debug):
     metrics = {name: _new_stage_metrics(name, stage)
                for name, stage in stages.items() if isinstance(stage, dict)}
     assessment = concept_assessment(debug)
-    if published_concept_assessment(debug) is not None:
+    if published_concept_concern(debug):
         assessment_stage = assessment.get("stage")
         if not isinstance(assessment_stage, str) or assessment_stage not in metrics:
             concept_stages = [name for name, record in metrics.items()

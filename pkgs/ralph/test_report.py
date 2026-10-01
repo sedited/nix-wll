@@ -208,6 +208,27 @@ class ReportTests(unittest.TestCase):
         self.assertNotIn('href="javascript:', html)
         self.assertNotIn('href="https://["', html)
 
+    def test_advisory_stop_and_verifier_disagreement_survive_public_report(self):
+        debug = self.debug()
+        concept = debug["concept_assessment"]
+        concept["candidate"].update(
+            goal="Reduce review effort", assessment="not_worth_pursuing",
+            proposed_review="would_stop", review_reason="The baseline supplies the benefit.")
+        concept["verification"] = {
+            "disposition": "no_concern", "assessment": None,
+            "reason": "The new behavior has an independent benefit.",
+            "proposed_review": "continue", "review_reason": "Review the implementation.",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            html_name = self.save(directory, debug)
+            public = json.loads((Path(directory) / "123-abcdef.json").read_text())
+            html = (Path(directory) / html_name).read_text()
+        self.assertEqual(public["concept_assessment"]["candidate"]["proposed_review"], "would_stop")
+        self.assertEqual(public["concept_assessment"]["verification"]["proposed_review"], "continue")
+        self.assertIn("The baseline supplies the benefit.", html)
+        self.assertIn("Review the implementation.", html)
+        self.assertIn("do not stop code review", html)
+
     def test_report_escapes_hostile_markup(self):
         raw = "</pre><script>alert('x')</script><pre>"
         content = "Verified </pre><script>alert('review')</script>"

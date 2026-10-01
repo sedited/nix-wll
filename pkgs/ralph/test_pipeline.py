@@ -16,10 +16,12 @@ def discovery(findings=(), sensitive=False):
 
 def assessment():
     return {
+        "goal": "Keep review effort focused on changes worth pursuing.",
         "problem": "Reviewers do not have enough context on prior attempts.",
         "baseline": "Reviewers can read the PR discussion manually.",
         "delivered_benefit": "The bot can summarize prior conceptual objections.",
         "relevant_history": "Prior discussion raised a layering concern.",
+        "assessment": "worth_pursuing",
         "alternatives": [{
             "name": "Do nothing",
             "concept": "Keep the current review flow.",
@@ -30,6 +32,8 @@ def assessment():
             "citations": [],
         }],
         "recommendation": "The submitted concept is acceptable.",
+        "proposed_review": "continue",
+        "review_reason": "No material concept concern is established.",
         "decisive_question": "Whether maintainers want discussion history in bot output.",
         "technical_assumptions": ["The discussion API returns human comments."],
         "citations": ["https://example.invalid/o/r/pulls/42"],
@@ -45,7 +49,9 @@ def verification(decisions=(), concept=None):
         "coverage": COMPLETE,
         "concept": concept or {"disposition": "no_concern",
                                "reason": "No material concept concern",
-                               "assessment": None},
+                               "assessment": None,
+                               "proposed_review": "continue",
+                               "review_reason": "The verifier found no material concept concern."},
         "decisions": list(decisions),
     })
 
@@ -92,9 +98,15 @@ class PipelineTests(unittest.TestCase):
         ]}), {"status": "completed"}
 
     def run_review(self, reviewer, editor=None, budget=None, ppq_api_key=None, ppq_budget=None,
-                   allow_discussions=True):
+                   allow_discussions=True, research_evidence=None, blind_alternatives=False):
         def wrapped_reviewer(*args, **kwargs):
             if kwargs["stage_name"] == "archaeologist":
+                if getattr(self, "record_archaeologist_call", False):
+                    self.calls.append((kwargs["stage_name"], kwargs["model"]))
+                if getattr(self, "capture_research_evidence", False):
+                    self.research_forwards.append(
+                        (kwargs["stage_name"], kwargs.get("research_evidence")))
+                    self.research_inputs[kwargs["stage_name"]] = args[1]
                 return getattr(self, "archaeology_output", archaeology())
             return reviewer(*args, **kwargs)
 
@@ -105,7 +117,8 @@ class PipelineTests(unittest.TestCase):
             return pipeline.review_with_independent_passes(
                 "key", "PR diff", self.snapshot, self.config, self.prompts, 42, self.debug,
                 budget=budget, ppq_api_key=ppq_api_key, ppq_budget=ppq_budget,
-                allow_discussions=allow_discussions)
+                allow_discussions=allow_discussions, research_evidence=research_evidence,
+                blind_alternatives=blind_alternatives)
 
     def test_parallel_adversarial_models_share_context_and_attribute_merged_finding(self):
         self.tier, self.audits = "sensitive", []
@@ -278,6 +291,96 @@ class PipelineTests(unittest.TestCase):
         self.assertNotIn("Duplicate setup", inputs["state"])
         self.assertIn("Duplicate setup", inputs["verifier"])
 
+    def test_archaeology_runs_after_routing_before_discovery(self):
+        self.tier, self.audits = "standard", ["tests"]
+        self.record_archaeologist_call = True
+
+        def review(*args, **kwargs):
+            self.calls.append((kwargs["stage_name"], kwargs["model"]))
+            return verification() if kwargs["stage_name"] == "verifier" else discovery()
+
+        self.run_review(review)
+
+        self.assertEqual([name for name, _model in self.calls],
+                         ["archaeologist", "independent", "tests", "verifier"])
+        self.assertEqual(self.debug["concept_assessment"]["status"], "no_concern")
+
+    def test_would_stop_advisory_still_runs_discovery_and_verifier_without_contamination(self):
+        self.tier, self.audits = "standard", ["tests", "design"]
+        stop_candidate = {**assessment(),
+                          "assessment": "rework_approach",
+                          "recommendation": "Use the smaller interface from the prior attempt.",
+                          "proposed_review": "would_stop",
+                          "review_reason": "The prior attempt avoids the current layering cost."}
+        self.archaeology_output = archaeology(stop_candidate)
+        inputs = {}
+
+        def review(*args, **kwargs):
+            stage = kwargs["stage_name"]
+            self.calls.append(stage)
+            inputs[stage] = args[1]
+            if stage == "verifier":
+                self.assertIn("concept_candidate", args[1])
+                return verification(concept={
+                    "disposition": "no_concern",
+                    "reason": "The premises are not decisive.",
+                    "assessment": None,
+                    "proposed_review": "continue",
+                    "review_reason": "The verifier found the submitted approach acceptable.",
+                })
+            return discovery()
+
+        self.run_review(review)
+
+        self.assertEqual(self.calls, ["independent", "tests", "design", "verifier"])
+        for stage in ("independent", "tests", "design"):
+            self.assertNotIn("would_stop", inputs[stage])
+            self.assertNotIn("Use the smaller interface", inputs[stage])
+        concept = self.debug["concept_assessment"]
+        self.assertEqual(concept["candidate"]["proposed_review"], "would_stop")
+        self.assertEqual(concept["verification"]["proposed_review"], "continue")
+        self.assertEqual(concept["status"], "no_concern")
+
+    def test_archaeology_failure_does_not_skip_discovery_or_verification(self):
+        self.tier, self.audits = "standard", ["tests"]
+        self.archaeology_output = "{not json"
+
+        def review(*args, **kwargs):
+            self.calls.append(kwargs["stage_name"])
+            return verification() if kwargs["stage_name"] == "verifier" else discovery()
+
+        content = self.run_review(review)
+
+        self.assertEqual(self.calls, ["independent", "tests", "verifier"])
+        self.assertIn("partial review", content)
+        self.assertEqual(self.debug["concept_assessment"]["status"], "failed")
+        self.assertEqual(self.debug["stages"]["archaeologist"]["status"], "invalid")
+
+    def test_archaeology_runs_when_discussions_are_disabled(self):
+        self.tier, self.audits = "routine", []
+        archaeology_inputs = []
+
+        def review(*args, **kwargs):
+            return verification() if kwargs["stage_name"] == "verifier" else discovery()
+
+        def wrapped_reviewer(*args, **kwargs):
+            if kwargs["stage_name"] == "archaeologist":
+                archaeology_inputs.append(args[1])
+                self.assertFalse(kwargs["allow_discussions"])
+                return archaeology()
+            return review(*args, **kwargs)
+
+        with patch.object(pipeline.routing, "plan_review", side_effect=self.plan), \
+                patch.object(model, "openai_review", side_effect=wrapped_reviewer), \
+                patch.object(model, "run_audit", side_effect=self.edit), \
+                patch.object(pipeline, "audit_developer_notes", return_value="Policy"):
+            pipeline.review_with_independent_passes(
+                "key", "PR diff", self.snapshot, self.config, self.prompts, 42,
+                self.debug, allow_discussions=False)
+
+        self.assertEqual(self.debug["stages"]["archaeologist"]["status"], "completed")
+        self.assertIn("Discussion lookup is disabled", archaeology_inputs[0])
+
     def test_verifier_protection_tracks_candidates_and_sensitive_escalation(self):
         self.tier, self.audits = "standard", ["tests"]
 
@@ -308,6 +411,46 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(budget.payloads[1]["max_output_tokens"], 8_000)
         self.assertEqual(budget.payloads[2]["reasoning"]["effort"], "high")
         self.assertIn("independent:1", budget.payloads[2]["input"][0]["content"])
+
+    def test_research_evidence_is_forwarded_and_removes_hosted_web_from_protection(self):
+        self.tier, self.audits = "routine", []
+        research_evidence = {"threads": []}
+        self.capture_research_evidence = True
+        self.research_forwards = []
+        self.research_inputs = {}
+
+        class Budget:
+            def __init__(self):
+                self.payloads = []
+
+            def protect_verifier(self, payload):
+                self.payloads.append(payload)
+
+            def summary(self):
+                return {}
+
+        budget = Budget()
+
+        def review(*args, **kwargs):
+            self.research_inputs[kwargs["stage_name"]] = args[1]
+            self.research_forwards.append(
+                (kwargs["stage_name"], kwargs.get("research_evidence")))
+            return verification() if kwargs["stage_name"] == "verifier" else discovery()
+
+        with patch.object(model.research, "inventory", return_value="Known frozen calls"):
+            self.run_review(review, budget=budget, research_evidence=research_evidence)
+
+        self.assertIn(("archaeologist", research_evidence), self.research_forwards)
+        self.assertIn(("verifier", research_evidence), self.research_forwards)
+        self.assertTrue(all(item is None for stage, item in self.research_forwards
+                            if stage not in {"archaeologist", "verifier"}))
+        self.assertIn("Known frozen calls", self.research_inputs["archaeologist"])
+        self.assertIn("Known frozen calls", self.research_inputs["verifier"])
+        self.assertNotIn("Known frozen calls", self.research_inputs["independent"])
+        self.assertTrue(all(tool.get("type") != "web_search"
+                            for payload in budget.payloads
+                            for tool in payload["tools"]))
+
 
     def test_attribution_retains_merged_sources_and_verifier_discovery_after_editing(self):
         self.tier, self.audits = "standard", ["tests"]
@@ -417,6 +560,9 @@ class PipelineTests(unittest.TestCase):
     def test_verified_material_concept_concern_gets_public_paragraph(self):
         self.tier, self.audits = "routine", []
         concern = {**assessment(),
+                   "assessment": "rework_approach",
+                   "proposed_review": "would_stop",
+                   "review_reason": "The process cost is decisive.",
                    "recommendation": "Doing nothing is conceptually stronger because the PR adds process cost."}
         self.archaeology_output = archaeology(concern)
 
@@ -426,6 +572,8 @@ class PipelineTests(unittest.TestCase):
                     "disposition": "publish",
                     "reason": "The cited discussion supports a material process cost.",
                     "assessment": concern,
+                    "proposed_review": "would_stop",
+                    "review_reason": "The verified process cost would stop the review.",
                 })
             return discovery()
 
@@ -436,17 +584,21 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("https://example.invalid/o/r/pulls/42", content)
         self.assertEqual(self.debug["concept_assessment"]["status"], "verified")
 
-    def test_discussion_disabled_review_keeps_archaeology_skipped(self):
+    def test_discussion_disabled_review_runs_archaeology_without_history_tools(self):
         self.tier, self.audits = "routine", []
+        archaeology_tools = []
 
         def review(*args, **kwargs):
+            if kwargs["stage_name"] == "archaeologist":
+                archaeology_tools.extend(kwargs["tools"])
             return verification() if kwargs["stage_name"] == "verifier" else discovery()
 
         content = self.run_review(review, allow_discussions=False)
 
         self.assertNotIn("Concept and approach", content)
-        self.assertEqual(self.debug["concept_assessment"]["status"], "skipped")
-        self.assertEqual(self.debug["stages"]["archaeologist"]["status"], "skipped")
+        self.assertEqual(self.debug["concept_assessment"]["status"], "no_concern")
+        self.assertEqual(self.debug["stages"]["archaeologist"]["status"], "completed")
+        self.assertTrue(all(tool.get("type") != "web_search" for tool in archaeology_tools))
 
 
 if __name__ == "__main__":

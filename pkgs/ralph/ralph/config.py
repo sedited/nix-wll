@@ -15,7 +15,7 @@ ADVERSARIAL_PROFILES = ("consensus", "wallet", "p2p")
 MODEL_NAMES = ("router", "independent", "adversarial", "adversarial_glm",
                *AUDIT_NAMES, "archaeologist", "verifier", "collator")
 PROMPT_NAMES = ("common", "router", "adversarial", *ADVERSARIAL_PROFILES,
-                *AUDIT_NAMES, "archaeologist", "verifier", "collator")
+                *AUDIT_NAMES, "archaeologist", "alternatives", "verifier", "collator")
 
 
 def load_prompt_file(path):

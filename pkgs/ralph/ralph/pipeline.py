@@ -33,30 +33,41 @@ def review_with_independent_passes(api_key, review, snapshot, bot_config,
                                   prompt_config, current_pr, debug,
                                   on_response=None, budget=None, is_current=None,
                                   routing_mode="enabled", allow_discussions=True,
-                                  ppq_api_key=None, ppq_budget=None):
+                                  ppq_api_key=None, ppq_budget=None,
+                                  research_evidence=None, blind_alternatives=True):
+    if research_evidence is not None:
+        allow_discussions = False
     stages = debug.setdefault("stages", {})
     outputs = debug.setdefault("stage_outputs", {})
     limitations = []
     candidates = []
     candidate_sources = debug.setdefault("candidate_sources", {})
     concept_candidate = None
+    alternatives_candidate = None
     verified_concept = None
     concept_summary = None
+    research_inventory = (model.research.inventory(research_evidence)
+                          if research_evidence is not None else None)
     plan = {"tier": "sensitive"}
 
+    def with_research_inventory(input_text):
+        if research_inventory is None:
+            return input_text
+        return input_text + "\n\nFrozen research inventory:\n" + research_inventory
+
     def verifier_input():
-        return review + "\n\nVerification input:\n" + json.dumps({
+        return with_research_inventory(review) + "\n\nVerification input:\n" + json.dumps({
             "candidate_findings": candidates,
             "concept_candidate": concept_candidate,
+            **({"blind_alternatives": alternatives_candidate}
+               if alternatives_candidate is not None else {}),
         })
 
     def protect_verification():
         if budget is not None:
             effort, output_tokens = stage_settings("verifier", plan["tier"])
-            tools = model.VERIFIER_TOOLS if allow_discussions else [
-                tool for tool in model.VERIFIER_TOOLS
-                if tool.get("name") not in model.LIVE_RESEARCH_TOOL_NAMES
-                and tool.get("type") not in model.WEB_SEARCH_TOOL_TYPES]
+            tools = model.available_tools(model.VERIFIER_TOOLS, allow_discussions,
+                                          research_evidence)
             debug["verification_budget"] = budget.protect_verifier({
                 "model": prompt_config.models["verifier"], "store": False,
                 "reasoning": {"effort": effort},
@@ -75,39 +86,52 @@ def review_with_independent_passes(api_key, review, snapshot, bot_config,
                                routing_mode, budget, is_current)
     notes = None
 
+    def stage_tools(name):
+        tools = (model.BASE_TOOLS if name == "alternatives"
+                 else model.ARCHAEOLOGY_TOOLS if name == "archaeologist"
+                 else model.VERIFIER_TOOLS if name == "verifier"
+                 else model.TOOLS if name in FULL_CONTEXT_STAGES
+                 else model.FOCUSED_TOOLS)
+        evidence = research_evidence if name in {"archaeologist", "verifier"} else None
+        return model.available_tools(tools, allow_discussions, evidence)
+
     def run_stage(name, input_text, prompt, schema, *, tools=True):
         if name not in ADVERSARIAL_STAGES:
             debug["pipeline_stage"] = name
-        record = {"model": prompt_config.models[name], "status": "running",
+        stage_model = prompt_config.models["archaeologist" if name == "alternatives" else name]
+        record = {"model": stage_model, "status": "running",
                   "turns": [], "tools": []}
         stages[name] = record
         if name in ADVERSARIAL_STAGES:
             record["profiles"] = list(plan["profiles"])
         try:
             if tools:
-                calls = (ARCHAEOLOGY_TOOL_LIMIT if name == "archaeologist"
+                calls = (ARCHAEOLOGY_TOOL_LIMIT if name in {"archaeologist", "alternatives"}
                          else 48 if name in {*ADVERSARIAL_STAGES, "verifier"}
                          else DISCOVERY_TOOL_LIMITS[plan["tier"]])
                 effort, output_tokens = stage_settings(name, plan["tier"])
+                available_tools = stage_tools(name)
+                extra = ({"research_evidence": research_evidence}
+                         if research_evidence is not None and name in {"archaeologist", "verifier"}
+                         else {})
                 answer = model.openai_review(
                     ppq_api_key if name == "adversarial_glm" else api_key,
                     input_text, snapshot, bot_config, prompt_config,
                     record, current_pr=current_pr, prompt=prompt,
-                    model=prompt_config.models[name],
-                    tools=(model.ARCHAEOLOGY_TOOLS if name == "archaeologist"
-                           else model.VERIFIER_TOOLS if name == "verifier"
-                           else model.TOOLS if name in FULL_CONTEXT_STAGES
-                           else model.FOCUSED_TOOLS),
+                    model=stage_model,
+                    tools=available_tools,
                     max_tool_calls=calls,
                     max_output_tokens=output_tokens,
                     reasoning_effort=effort,
-                    first_tool_required=name in FULL_CONTEXT_STAGES or name == "archaeologist",
+                    first_tool_required=bool(available_tools)
+                    and (name in FULL_CONTEXT_STAGES or name in {"archaeologist", "alternatives"}),
                     stage_name=name, on_response=on_response,
                     budget=ppq_budget if name == "adversarial_glm" else budget,
                     response_schema=schema, allow_discussions=allow_discussions,
                     is_current=is_current,
                     **({"api_base": "https://api.ppq.ai/v1"}
-                       if name == "adversarial_glm" else {}))
+                       if name == "adversarial_glm" else {}),
+                    **extra)
             else:
                 answer, response = model.run_audit(
                     api_key, name, prompt, input_text, prompt_config,
@@ -170,12 +194,17 @@ def review_with_independent_passes(api_key, review, snapshot, bot_config,
 
     def run_archaeologist():
         prompt = prompt_config.audit_prompts["archaeologist"]
-        prelude = review.split("\nPatch:\n", 1)[0]
+        unavailable = (
+            "\n\nDiscussion lookup is disabled for this review. Explain which "
+            "history was unavailable and assess the concept from the PR rationale, "
+            "patch context, and any non-discussion evidence you can inspect."
+            if not allow_discussions and research_evidence is None else "")
         input_text = (
             f"Current PR: {bot_config.repository_url}/pulls/{current_pr}\n"
             f"Changed paths: {json.dumps(sorted(snapshot.changed_paths))}\n\n"
-            f"{prelude}"
+            f"{review}{unavailable}"
         )
+        input_text = with_research_inventory(input_text)
         try:
             answer = run_stage("archaeologist", input_text, prompt,
                                protocol.ARCHAEOLOGY_SCHEMA)
@@ -205,6 +234,34 @@ def review_with_independent_passes(api_key, review, snapshot, bot_config,
             limitations.append("The archaeology review did not complete.")
             return None
 
+    concept_candidate = run_archaeologist()
+    if blind_alternatives and concept_candidate is not None:
+        protect_verification()
+        # Only the goal and baseline cross this boundary, never the PR solution
+        # or discussion. The tools expose only the pinned merge-base tree.
+        alternative_input = json.dumps({key: concept_candidate[key]
+                                        for key in ("problem", "goal", "baseline")})
+        try:
+            answer = run_stage("alternatives", alternative_input,
+                               prompt_config.audit_prompts["alternatives"],
+                               protocol.ALTERNATIVES_SCHEMA)
+            result = protocol.blind_alternatives(answer)
+            stages["alternatives"]["coverage"] = result["coverage"]
+            alternatives_candidate = result["alternatives"]
+            if result["coverage"]["status"] == "partial":
+                limitations.append("The alternatives experiment had incomplete evidence.")
+        except model.StaleReview:
+            raise
+        except Exception as exc:
+            record = stages["alternatives"]
+            if record["status"] == "completed":
+                record.update(status="invalid", error_type=type(exc).__name__)
+            limitations.append("The alternatives experiment did not complete.")
+    elif blind_alternatives:
+        stages["alternatives"] = {
+            "model": prompt_config.models["archaeologist"], "status": "skipped",
+            "reason": "No valid problem and baseline from concept review.",
+            "turns": [], "tools": []}
     protect_verification()
     sensitive = collect("independent", discover("independent"))
     selected = set(plan["audits"])
@@ -247,16 +304,6 @@ def review_with_independent_passes(api_key, review, snapshot, bot_config,
             if name == "adversarial_glm" and not ppq_api_key:
                 stages[name]["reason"] = "PPQ API key is not configured"
 
-    if allow_discussions:
-        concept_candidate = run_archaeologist()
-    else:
-        stages["archaeologist"] = {"model": prompt_config.models["archaeologist"],
-                                   "status": "skipped", "turns": [], "tools": [],
-                                   "reason": "Discussion lookup disabled for this review"}
-        debug["concept_assessment"] = {
-            "status": "skipped",
-            "reason": "Discussion lookup disabled for this review",
-        }
     protect_verification()
 
     if is_current is not None and not is_current():
@@ -373,4 +420,5 @@ def review_with_independent_passes(api_key, review, snapshot, bot_config,
     if ppq_budget is not None:
         debug["ppq_budget"] = ppq_budget.summary()
     debug.pop("pipeline_stage", None)
-    return protocol.render(findings, limitations, concept_summary)
+    return protocol.render(findings, limitations, concept_summary,
+                           verified_concept["alternatives"] if verified_concept else ())

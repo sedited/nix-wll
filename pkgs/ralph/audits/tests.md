@@ -40,8 +40,3 @@ meaningful alternatives, or does a test merely assert the chosen constant?
 Distinguish regression coverage from evidence that the default suits users.
 If important evidence is missing, name the unresolved tradeoff and the smallest
 useful measurement; do not request a benchmark suite for a harmless choice.
-
-Return the discovery object in the supplied schema, including coverage and
-limitations. For a test-quality suggestion, name the coverage gained or lost,
-its current cost, the concrete alternative, and why useful regression
-protection remains.

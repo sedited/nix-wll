@@ -14,6 +14,21 @@ class TraceAttributionTests(unittest.TestCase):
             models={"independent": "gpt-6-luna", "verifier": "gpt-6-luna",
                     "collator": "gpt-6-luna"})
 
+    def test_favorable_public_assessment_is_not_counted_as_a_concern(self):
+        debug = {
+            "concept_assessment": {
+                "status": "verified", "stage": "archaeologist", "summary": "Worth pursuing.",
+                "verification": {"disposition": "publish",
+                                 "assessment": {"assessment": "worth_pursuing"}},
+            },
+            "stages": {"archaeologist": {"status": "completed"},
+                       "alternatives": {"status": "completed"}},
+        }
+        self.assertIsNotNone(trace.published_concept_assessment(debug))
+        self.assertFalse(trace.published_concept_concern(debug))
+        self.assertEqual(trace.stage_metrics(debug)["archaeologist"]["conceptual_concerns"], 0)
+        self.assertTrue(trace.stage_metrics(debug)["alternatives"]["concept_stage"])
+
     def test_stage_metrics_credit_merged_candidates_without_unique_overcount(self):
         debug = {
             "candidate_sources": {

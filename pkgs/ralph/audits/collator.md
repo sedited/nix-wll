@@ -37,6 +37,9 @@ from the accepted assessment. Do not quote or argue with PR comments. Do not
 turn the concept paragraph into a code finding, severity, ACK/NACK, or
 standalone merge verdict. If the accepted assessment says the current approach
 is conceptually unsound, keep that judgment and the reason.
+Include favorable assessments too, explaining their benefit against the
+baseline. Python appends the verifier's alternatives with their benefits, costs,
+and uncertainty after your paragraph, so do not duplicate that list.
 
 Do not invent an assessment of code you cannot see. Do not repeat the PR title,
 description, base or head hash, or discuss the review process. Use plain words,

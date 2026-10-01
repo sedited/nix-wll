@@ -423,7 +423,7 @@ def _concept_summary(debug):
             citations.extend(alternative["citations"])
     status = concept.get("status") if isinstance(concept.get("status"), str) else "unknown"
     stage = concept.get("stage") if isinstance(concept.get("stage"), str) else None
-    published_concern = trace.published_concept_assessment(debug) is not None
+    published_concern = trace.published_concept_concern(debug)
     return {
         "published_concern": published_concern,
         "status": status,

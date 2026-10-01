@@ -50,12 +50,18 @@ CONCEPT_ALTERNATIVE = object_schema({
     "citations": STRINGS,
 })
 CONCEPT_ASSESSMENT = object_schema({
+    "goal": STRING,
     "problem": STRING,
     "baseline": STRING,
     "delivered_benefit": STRING,
     "relevant_history": STRING,
+    "assessment": {"type": "string", "enum": ["worth_pursuing", "needs_motivation",
+                                              "rework_approach", "not_worth_pursuing"]},
     "alternatives": {"type": "array", "items": CONCEPT_ALTERNATIVE},
     "recommendation": STRING,
+    "proposed_review": {"type": "string", "enum": ["continue", "would_stop",
+                                                   "undetermined"]},
+    "review_reason": STRING,
     "decisive_question": STRING,
     "technical_assumptions": STRINGS,
     "citations": STRINGS,
@@ -64,11 +70,17 @@ ARCHAEOLOGY_SCHEMA = object_schema({
     "coverage": COVERAGE,
     "assessment": CONCEPT_ASSESSMENT,
 })
+ALTERNATIVES_SCHEMA = object_schema({
+    "coverage": COVERAGE,
+    "alternatives": {"type": "array", "items": CONCEPT_ALTERNATIVE},
+})
 CONCEPT_VERIFICATION = object_schema({
     "disposition": {"type": "string", "enum": ["publish", "drop", "unresolved",
                                                "no_concern"]},
     "reason": STRING,
     "assessment": {"anyOf": [CONCEPT_ASSESSMENT, {"type": "null"}]},
+    "proposed_review": CONCEPT_ASSESSMENT["properties"]["proposed_review"],
+    "review_reason": STRING,
 })
 VERIFIER_SCHEMA = object_schema({
     "coverage": COVERAGE,
@@ -170,19 +182,37 @@ def discovery(text, stage, snapshot):
 
 def _concept_assessment(value):
     _object(value, CONCEPT_ASSESSMENT["properties"])
-    _text(value, ("problem", "baseline", "delivered_benefit", "relevant_history",
-                  "recommendation", "decisive_question"))
+    _text(value, ("goal", "problem", "baseline", "delivered_benefit", "relevant_history",
+                  "recommendation", "review_reason", "decisive_question"))
+    if value["assessment"] not in CONCEPT_ASSESSMENT["properties"]["assessment"]["enum"]:
+        raise InvalidReview("Invalid concept assessment")
+    _review_proposal(value["proposed_review"], value["review_reason"], value)
     _strings(value["technical_assumptions"])
     _citations(value["citations"])
-    alternatives = value["alternatives"]
-    if not isinstance(alternatives, list) or not 1 <= len(alternatives) <= 4:
-        raise InvalidReview("Concept assessment must compare one to four alternatives")
+    _concept_alternatives(value["alternatives"])
+
+
+def _concept_alternatives(alternatives):
+    if not isinstance(alternatives, list) or not 0 <= len(alternatives) <= 4:
+        raise InvalidReview("Concept assessment must compare up to four alternatives")
     for alternative in alternatives:
         _object(alternative, CONCEPT_ALTERNATIVE["properties"])
         _text(alternative, ("name", "concept", "benefit", "cost", "unresolved"))
         _citations(alternative["citations"])
         if alternative["provenance"] not in CONCEPT_ALTERNATIVE["properties"]["provenance"]["enum"]:
             raise InvalidReview("Invalid alternative provenance")
+
+
+def _review_proposal(proposed_review, review_reason, assessment):
+    if proposed_review not in CONCEPT_ASSESSMENT["properties"]["proposed_review"]["enum"]:
+        raise InvalidReview("Invalid proposed review")
+    if not isinstance(review_reason, str) or not review_reason.strip():
+        raise InvalidReview("Missing proposed review reason")
+    if (proposed_review == "would_stop"
+            and (assessment is None
+                 or assessment["assessment"] not in {"rework_approach", "not_worth_pursuing"})):
+        raise InvalidReview(
+            "would_stop requires a verified rework_approach or not_worth_pursuing assessment")
 
 
 def _concept_citations(assessment):
@@ -211,6 +241,17 @@ def archaeology(text):
     return result
 
 
+def blind_alternatives(text):
+    result = json.loads(text)
+    _object(result, ALTERNATIVES_SCHEMA["properties"])
+    _coverage(result["coverage"])
+    _concept_alternatives(result["alternatives"])
+    for alternative in result["alternatives"]:
+        if alternative["provenance"] != "agent_inference" or alternative["citations"]:
+            raise InvalidReview("Blind alternatives must be uncited agent inferences")
+    return result
+
+
 def verification(text, candidates, snapshot, concept_assessment=None):
     result = json.loads(text)
     _object(result, VERIFIER_SCHEMA["properties"])
@@ -223,17 +264,21 @@ def verification(text, candidates, snapshot, concept_assessment=None):
         _object(concept, CONCEPT_VERIFICATION["properties"])
         if concept["disposition"] not in ("publish", "drop", "unresolved", "no_concern"):
             raise InvalidReview("Invalid concept disposition")
-        _text(concept, ("reason",))
+        _text(concept, ("reason", "review_reason"))
         if concept["disposition"] == "publish":
             if concept_assessment is None:
                 raise InvalidReview("Concept assessment had no archaeology candidate")
             _concept_assessment(concept["assessment"])
         elif concept["assessment"] is not None:
             raise InvalidReview("Only publish may include a concept assessment")
+        _review_proposal(concept["proposed_review"], concept["review_reason"],
+                         concept["assessment"])
     except InvalidReview as exc:
         error = str(exc)
         concept = {"disposition": "unresolved", "assessment": None,
-                   "reason": f"Concept assessment withheld: {error}"}
+                   "reason": f"Concept assessment withheld: {error}",
+                   "proposed_review": "undetermined",
+                   "review_reason": "The verifier output did not satisfy the concept schema."}
         result["concept"] = concept
         result["concept_validation_error"] = error
     if concept["disposition"] == "unresolved":
@@ -317,10 +362,18 @@ def collation(text, accepted, concept_assessment=None):
     return edited, concept_summary
 
 
-def render(findings, limitations=(), concept_summary=None):
+def render(findings, limitations=(), concept_summary=None, concept_alternatives=()):
     sections = []
     if concept_summary:
         sections.append(f"##### Concept and approach\n\n{concept_summary}")
+        if concept_alternatives:
+            alternatives = []
+            for alternative in concept_alternatives:
+                alternatives.append(
+                    f"- **{alternative['name']}**: {alternative['concept']} "
+                    f"Benefit: {alternative['benefit']} Cost: {alternative['cost']} "
+                    f"Uncertainty: {alternative['unresolved']}")
+            sections.append("Alternatives considered:\n\n" + "\n".join(alternatives))
     groups = {}
     for finding in findings:
         section = "design" if finding["kind"] == "design" else finding["severity"]

@@ -20,7 +20,9 @@ class ProtocolTests(unittest.TestCase):
             "coverage": coverage or self.coverage,
             "concept": concept or {"disposition": "no_concern",
                                    "reason": "No material concept concern",
-                                   "assessment": None},
+                                   "assessment": None,
+                                   "proposed_review": "continue",
+                                   "review_reason": "The verifier found no material concept concern."},
             "decisions": decisions,
         })
 
@@ -29,10 +31,12 @@ class ProtocolTests(unittest.TestCase):
 
     def concept_assessment(self, citations=None):
         return {
+            "goal": "Reduce review friction for repeated manual checks.",
             "problem": "The proposal solves a narrow workflow problem.",
             "baseline": "Maintainers can keep the current workflow.",
             "delivered_benefit": "The PR removes one manual step.",
             "relevant_history": "Prior discussion raised a layering concern.",
+            "assessment": "rework_approach",
             "alternatives": [{
                 "name": "Do nothing",
                 "concept": "Keep the current behavior.",
@@ -43,6 +47,8 @@ class ProtocolTests(unittest.TestCase):
                 "citations": [],
             }],
             "recommendation": "The alternative is conceptually stronger.",
+            "proposed_review": "would_stop",
+            "review_reason": "The alternative preserves the benefit with less maintenance cost.",
             "decisive_question": "Whether the manual step affects common review paths.",
             "technical_assumptions": ["Verifier should check the call path."],
             "citations": citations or ["https://code.example.org/org/repo/pulls/1"],
@@ -187,19 +193,64 @@ class ProtocolTests(unittest.TestCase):
 
     def test_concept_publish_is_separate_from_finding_decisions(self):
         concept = {"disposition": "publish", "reason": "Layering concern is supported",
-                   "assessment": self.concept_assessment()}
+                   "assessment": self.concept_assessment(),
+                   "proposed_review": "would_stop",
+                   "review_reason": "The verified alternative avoids the layering concern."}
         result, accepted = protocol.verification(
             self.verification([], concept=concept), [], self.snapshot,
             concept_assessment=self.concept_assessment())
 
         self.assertEqual(accepted, [])
         self.assertEqual(result["concept"]["disposition"], "publish")
+        self.assertEqual(result["concept"]["proposed_review"], "would_stop")
         self.assertEqual(result["concept"]["assessment"]["recommendation"],
                          "The alternative is conceptually stronger.")
 
+    def test_concept_assessment_can_have_no_alternatives(self):
+        assessment = {**self.concept_assessment(), "alternatives": []}
+        result = protocol.archaeology(json.dumps({
+            "coverage": self.coverage,
+            "assessment": assessment,
+        }))
+
+        self.assertEqual(result["assessment"]["alternatives"], [])
+
+    def test_nonpublish_concept_preserves_verified_review_proposal(self):
+        concept = {"disposition": "no_concern",
+                   "reason": "The concern is not established.",
+                   "assessment": None,
+                   "proposed_review": "continue",
+                   "review_reason": "The verifier did not find a decisive concept blocker."}
+        result, accepted = protocol.verification(
+            self.verification([], concept=concept), [], self.snapshot,
+            concept_assessment=self.concept_assessment())
+
+        self.assertEqual(accepted, [])
+        self.assertIsNone(result["concept"]["assessment"])
+        self.assertEqual(result["concept"]["proposed_review"], "continue")
+        self.assertEqual(result["coverage"]["status"], "complete")
+
+    def test_would_stop_requires_rework_or_rejection_assessment(self):
+        concept = {"disposition": "publish",
+                   "reason": "The concern is supposedly verified.",
+                   "assessment": {**self.concept_assessment(),
+                                  "assessment": "worth_pursuing"},
+                   "proposed_review": "would_stop",
+                   "review_reason": "This should not be enough to stop review."}
+        result, accepted = protocol.verification(
+            self.verification([], concept=concept), [], self.snapshot,
+            concept_assessment=self.concept_assessment())
+
+        self.assertEqual(accepted, [])
+        self.assertEqual(result["concept"]["disposition"], "unresolved")
+        self.assertEqual(result["concept"]["proposed_review"], "undetermined")
+        self.assertIn("would_stop", result["concept_validation_error"])
+
     def test_invalid_concept_is_withheld_without_discarding_findings(self):
         bad_concept = {"disposition": "publish", "reason": "Bad citation",
-                       "assessment": self.concept_assessment(["not-a-url"])}
+                       "assessment": self.concept_assessment(["not-a-url"]),
+                       "proposed_review": "would_stop",
+                       "review_reason": "The citation should fail validation."}
         decision = {"candidate_ids": ["tests:1"], "disposition": "publish",
                     "reason": "Verified", "finding": self.finding}
         result, accepted = protocol.verification(

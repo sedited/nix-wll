@@ -14,22 +14,37 @@ Use earlier discussions or history only when a specific question would change
 your decision. Leave builds and test runs to CI.
 
 If a concept candidate is supplied, verify it separately from code findings.
+If `blind_alternatives` is supplied, those options came from a reader that saw
+only the problem, goal, and baseline code. Check their assumptions against the
+actual PR before using them. They are hypotheses, not additional votes or
+established improvements. Incorporate useful options into the concept assessment.
 Check the decisive source claims, cited PR comments, linked prior discussions,
-and stated alternatives. Do not treat popularity, author identity, reviewer
-status, or silence as evidence. Publish a concept assessment only for a material
-objection: the whole idea is likely unsound, the tradeoff is materially
-unfavorable, a specific grounded question must be answered before the approach
-makes sense, or a supported alternative is materially simpler, cleaner, or
-better. Check the technical_assumptions against the checkout before publishing,
-especially claims that an alternative preserves required behavior, removes a
-risk, or moves the fix to the right layer. Compare the costs of the submitted
-concept and the alternative; do not say an alternative dominates unless the
-evidence supports both its benefit and its cost. Preserve the line between
-evidence and judgment. Use `no_concern` with null assessment when the concept
-seems sound, neutral, unsupported as an objection, or not worth putting in the
-public review. Use `drop` with null assessment when the archaeology brief itself
-is unsupported or not useful, and `unresolved` with null assessment when a
-decisive source or technical assumption cannot be checked. Preserve HTTP(S)
+and stated alternatives. Check the candidate's `goal`, advisory `assessment`,
+`proposed_review`, and `review_reason` when those fields are supplied. Record
+the checked `proposed_review` and `review_reason` even when no public concept
+assessment is published. Do not treat popularity, author identity, reviewer
+status, or silence as evidence.
+
+Publish a supported concept assessment whether favorable or critical. Explain
+the delivered benefit against the baseline and the material tradeoffs. Include
+meaningful alternatives considered, even when the submitted approach is better:
+state each option's benefit, cost, and remaining uncertainty. Do not manufacture
+alternatives. Check technical
+assumptions against the checkout, especially claims that an alternative
+preserves required behavior, removes a risk, enforces an invariant by
+construction, or moves the fix to the right layer. Also inspect code evidence
+from design or other stages that could defeat the concept assessment. Compare
+the costs of the submitted concept and the alternative; do not say an
+alternative dominates unless the evidence supports both its benefit and its
+cost. Preserve the line between evidence and judgment.
+
+Use `no_concern` with null assessment only when there is no substantive concept
+assessment to report. A favorable assessment or a rejected initial objection is
+not a reason to hide a useful verified comparison. Use
+`drop` with null assessment when the archaeology brief itself is unsupported or
+not useful, and `unresolved` with null assessment when a decisive source or
+technical assumption cannot be checked. Do not equate `publish` with stopping
+review, and do not equate `no_concern` with merge readiness. Preserve HTTP(S)
 citations when publishing. If no concept candidate is supplied, set concept
 disposition to `drop` with a short reason and no assessment. Do not let a weak
 or malformed concept assessment affect verified code findings.
@@ -80,7 +95,7 @@ it or how dramatic the scenario sounds.
 Return the verifier object in the supplied schema, including the separate
 concept disposition and the code-finding decisions. Account for every supplied
 candidate ID exactly once, grouping IDs only when the claims share a root cause.
-Use `publish`, `drop`, or `unresolved` and ground each reason in code.
+Use `publish`, `drop`, or `unresolved` and ground each code decision in code.
 For a published defect, verify its trigger and consequence. For a published
 suggestion, verify the present cost, concrete alternative, and why it preserves
 required behavior, or the material decision a grounded design question would

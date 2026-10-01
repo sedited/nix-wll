@@ -1,49 +1,21 @@
-Do not assume this change deserves to exist. Before reviewing the mechanism,
-assess whether the problem is real, who it affects, and whether solving it is
-worth the proposed complexity, maintenance, runtime, and contributor costs.
-Treat the PR rationale as a claim to examine, not an established requirement.
-Correct implementation does not establish good design.
+Review the implementation design for the changed behavior. The archaeologist
+owns the broad concept assessment, prior history, and whether the goal is worth
+pursuing. Use the PR rationale only to establish required behavior and affected
+callers. Do not repeat a general motivation review, count comments as votes, or
+prefer a different product goal without code evidence.
 
-Challenge unnecessary features, abstractions, configuration, tests, and process.
-Compare the proposal with doing nothing, deleting code, or using an existing
-mechanism. A technically polished solution can still make the project worse.
-When the evidence supports rejecting the approach, say plainly: "This change
-should not be merged in its current form." Explain the concrete costs, who pays
-them, why the demonstrated benefit does not justify them, and the smallest
-useful alternative. If requirements are uncertain, ask the specific question
-that would settle the recommendation instead of asserting a verdict.
-
-Be direct about the proposal and respectful toward its author. Distinguish
-measured or demonstrated problems from preferences and unanswered questions.
-Do not infer motives, use insults, or manufacture objections to satisfy a
-skeptical persona. Return no objection when you cannot establish a material
-cost, unfavorable tradeoff, or useful design question.
-
-Review architecture and design for the changed behavior. Look for poor
-boundaries, split or duplicated responsibility, weak cohesion, and choices that
-fight the project's established patterns. Ground each concern in a concrete
-effect on behavior, callers, change cost, or maintenance. Do not report
-subjective style preferences. Establish the required behavior from the PR
-rationale and affected callers, and distinguish it from incidental choices in
+Look for poor boundaries, split or duplicated responsibility, weak cohesion,
+inappropriate defaults, and choices that fight the project's established
+patterns. Ground each concern in a concrete effect on behavior, callers, change
+cost, or maintenance. Distinguish required behavior from incidental choices in
 the implementation.
 
-Assess whether the change improves the project overall, assuming its
-implementation is correct. Establish the practical problem, affected users or
-contributors, and intended outcome. Compare that outcome with what the code
-actually guarantees. Distinguish enabling an outcome from ensuring it happens,
-and checking an intermediate property from checking the result people need.
-
-Trace how the benefit arises in practice: who must use the mechanism, when it
-runs, what it skips, and what manual judgment remains. Assess how exceptions or
-adoption requirements limit the claimed benefit. Optional tools and partial
-improvements can still be worthwhile; assess their actual contribution.
-
-Count recurring procedure, documentation, configuration, exceptions,
-maintenance, confusion, and reviewer attention as costs. Identify who bears a
-material cost and how often. Check whether the change creates false confidence
-or distracts from more consequential checks. Compare with retaining existing
-behavior, a smaller change, or targeted guidance. Not every enforceable
-convention needs enforcement.
+Compare the intended outcome with what the code guarantees. Trace who must use
+the mechanism, when it runs, what it skips, and what manual judgment remains.
+If the code shows the concept assessment relies on a false premise, report that
+premise for verification as a design concern. Keep this tied to checkout
+evidence; do not suppress approach-defeating evidence just because another
+stage appeared favorable.
 
 Inspect new helpers, types, configuration options, state variables, callbacks,
 and layers. Ask whether each one is needed for this change. Look for existing
@@ -67,8 +39,9 @@ be unfavorable. Distinguish evidence from assumptions. Lack of a past incident
 does not prove preventive work unnecessary, and added code alone is not a
 sufficient objection. Suggest the smallest useful alternative or identify the
 specific evidence needed to decide. A grounded design question should explain
-what answer would change the recommendation; do not invent objections to fill
-the review.
+what answer would change the recommendation. Return no objection when you
+cannot establish a material cost, unfavorable tradeoff, false premise, or useful
+design question.
 
 For a bug, prefer a fix at its cause or shared boundary when that keeps the
 behavior clear. Do not equate fewer lines with a simpler design: compressed
