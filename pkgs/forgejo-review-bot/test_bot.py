@@ -277,6 +277,68 @@ class BotTests(unittest.TestCase):
         self.assertNotIn("Bot review", discussion)
         self.assertEqual(forgejo.read_discussion(self.bot_config, -1, 99), "Invalid issue or PR number.")
 
+    def test_current_pr_discussion_reads_exact_pages_and_review_comments(self):
+        issue = {"number": 42, "pull_request": {"html_url": "ignored"},
+                 "title": "Concept change", "body": "Rationale"}
+        page_two = [{"id": 21, "user": {"login": "reviewer"},
+                     "body": "Middle-page concern"}]
+        reviews = [{"id": 7, "user": {"login": "reviewer"},
+                    "body": "Summary with review id"}]
+        inline = [{"id": 70, "user": {"login": "reviewer"},
+                   "body": "Inline concern" + "x" * 1600}]
+
+        def request(bot_config, path):
+            if path == "/issues/42":
+                return issue
+            if path == "/issues/42/comments?limit=10&page=2":
+                return page_two
+            if path == "/pulls/42/reviews?limit=10&page=1":
+                return reviews
+            if path == "/pulls/42/reviews/7/comments":
+                return inline
+            self.fail(path)
+
+        with patch.object(forgejo, "public_discussion_request", side_effect=request):
+            comments = forgejo.read_current_pr_discussion(
+                self.bot_config, 42, "comments", 2, 0)
+            review_list = forgejo.read_current_pr_discussion(
+                self.bot_config, 42, "reviews", 1, 0)
+            inline_comments = forgejo.read_current_pr_discussion(
+                self.bot_config, 42, "inline", 1, 7)
+
+        self.assertIn("Issue comments page 2", comments)
+        self.assertIn("Middle-page concern", comments)
+        self.assertIn("id=7", review_list)
+        self.assertIn("Inline concern", inline_comments)
+        self.assertIn("[Comment truncated]", inline_comments)
+        self.assertIn("review_id", forgejo.read_current_pr_discussion(
+            self.bot_config, 42, "inline", 1, 0))
+
+    def test_github_discussion_permalink_fetches_referenced_inline_comment(self):
+        issue = {"title": "Upstream PR", "body": "Original rationale"}
+        comment = {"id": 123, "user": {"login": "reviewer"},
+                   "body": "Referenced inline concern",
+                   "html_url": "https://github.com/bitcoin/bitcoin/pull/29415#discussion_r123"}
+        calls = []
+
+        def github(path):
+            calls.append(path)
+            if path == "/repos/bitcoin/bitcoin/issues/29415":
+                return issue
+            if path == "/repos/bitcoin/bitcoin/pulls/comments/123":
+                return comment
+            self.fail(path)
+
+        with patch.object(forgejo, "_github_api", side_effect=github):
+            discussion = forgejo.read_github_discussion(
+                self.bot_config,
+                "https://github.com/bitcoin/bitcoin/pull/29415#discussion_r123",
+                "inline", 99)
+
+        self.assertIn("Referenced inline concern", discussion)
+        self.assertTrue(any(path.endswith("/pulls/comments/123") for path in calls))
+        self.assertNotIn("page=99", " ".join(calls))
+
     def test_current_pr_is_excluded_before_any_discussion_fetch(self):
         with patch.object(forgejo, "public_discussion_request", return_value=[
                 {"number": 42, "title": "Current PR", "pull_request": {}},

@@ -173,6 +173,38 @@ class ModelBudgetTests(unittest.TestCase):
         choices = [json.loads(call.args[0].data)["tool_choice"] for call in send.call_args_list]
         self.assertEqual(choices, ["required"] + ["auto"] * 11 + ["none"])
 
+    def test_hosted_web_search_continues_and_records_sources(self):
+        results = [
+            {"id": "search", "model": "gpt-6-luna", "status": "completed",
+             "output": [{"type": "web_search_call", "action": {
+                 "type": "search", "query": "bitcoin prior PR",
+                 "sources": [{"type": "url", "url": "https://example.invalid/pr",
+                              "title": "Prior PR"}]}}],
+             "usage": {"input_tokens": 10, "input_tokens_details": {
+                 "cached_tokens": 0, "cache_write_tokens": 0}, "output_tokens": 2}},
+            {"id": "final", "model": "gpt-6-luna", "status": "completed",
+             "output": [{"type": "message", "content": [
+                 {"type": "output_text", "text": "Review complete."}]}],
+             "usage": {"input_tokens": 12, "input_tokens_details": {
+                 "cached_tokens": 0, "cache_write_tokens": 0}, "output_tokens": 3}},
+        ]
+        debug = {}
+        with patch.object(model.urllib.request, "urlopen",
+                          side_effect=[Response(item) for item in results]) as send:
+            answer = model.openai_review(
+                "secret", "patch", self.snapshot, SimpleNamespace(), self.prompt_config,
+                debug, tools=model.ARCHAEOLOGY_TOOLS, max_tool_calls=12,
+                stage_name="archaeologist")
+
+        self.assertEqual(answer, "Review complete.")
+        first = json.loads(send.call_args_list[0].args[0].data)
+        self.assertEqual(first["max_tool_calls"], model.MAX_WEB_SEARCH_CALLS_PER_RESPONSE)
+        self.assertEqual(first["include"], ["web_search_call.action.sources"])
+        self.assertEqual(debug["turns"][0]["web_search_calls"], 1)
+        self.assertEqual(debug["tools"][0]["name"], "web_search")
+        self.assertEqual(debug["tools"][0]["sources"], [{
+            "type": "url", "url": "https://example.invalid/pr", "title": "Prior PR"}])
+
     def test_stale_review_between_turns_does_not_reserve_again(self):
         call = {"type": "function_call", "call_id": "call-1",
                 "name": "read_file", "arguments": '{"path":"src/a.cpp","start_line":1}'}

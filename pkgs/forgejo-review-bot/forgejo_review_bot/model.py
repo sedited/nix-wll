@@ -9,7 +9,7 @@ import urllib.request
 from . import forgejo
 from .repository import (find_paths, read_file, read_diff, search_code, blame_base,
                          read_commit)
-from .spend import BudgetExceeded
+from .spend import BudgetExceeded, web_search_calls
 
 MAX_TOOL_CALLS = 48
 MAX_OUTPUT_TOKENS = 6_000
@@ -20,7 +20,10 @@ MAX_COLLATOR_OUTPUT_TOKENS = 6_000
 MAX_COLLATOR_OUTPUT_BYTES = 10_000
 MAX_CONTEXT_CALLS = 8
 MAX_HISTORY_CALLS = 8
+MAX_WEB_SEARCH_CALLS_PER_RESPONSE = 2
 SAFE_NO_CHARGE_HTTP_STATUSES = {400, 401, 403, 404, 429}
+WEB_SEARCH_TOOL_TYPES = {"web_search"}
+WEB_SEARCH_TOOL = {"type": "web_search", "search_context_size": "low"}
 TOOLS = [
     {"type": "function", "name": "find_paths", "strict": True,
      "description": "Find tracked file paths at the PR head containing a case-insensitive "
@@ -85,7 +88,37 @@ TOOLS = [
          "path": {"type": "string", "description": "Repository-relative file path"}},
          "required": ["commit", "path"], "additionalProperties": False}},
 ]
+PR_DISCUSSION_TOOLS = [
+    {"type": "function", "name": "read_current_pr_discussion", "strict": True,
+     "description": "Read the current PR's title, description, ordinary comments, "
+                    "inline comments, and pull review summaries. The page argument "
+                    "bounds pagination from 1 to 1000. For inline comments, first "
+                    "read reviews, then pass the review id. Use only for conceptual history "
+                    "or verifying a conceptual assessment; do not use as code evidence.",
+     "parameters": {"type": "object", "properties": {
+         "kind": {"type": "string", "enum": ["comments", "inline", "reviews"]},
+         "page": {"type": "integer", "description": "Page to fetch, 1 to 1000"},
+         "review_id": {"type": "integer", "description": "Forgejo review id for inline comments, otherwise 0"}},
+         "required": ["kind", "page", "review_id"],
+                    "additionalProperties": False}},
+    {"type": "function", "name": "read_github_discussion", "strict": True,
+     "description": "Read a public GitHub pull request or issue discussion, "
+                    "including ordinary comments, inline review comments, and "
+                    "review summaries. Use for original upstream PR threads linked "
+                    "from mirrored reviews. The page argument bounds pagination from 1 to 1000.",
+     "parameters": {"type": "object", "properties": {
+         "url": {"type": "string", "description": "Public GitHub pull or issue URL"},
+         "kind": {"type": "string", "enum": ["comments", "inline", "reviews"]},
+         "page": {"type": "integer", "description": "Page to fetch, 1 to 1000"}},
+         "required": ["url", "kind", "page"],
+                    "additionalProperties": False}},
+]
 FOCUSED_TOOLS = TOOLS[:5]
+ARCHAEOLOGY_TOOLS = [tool for tool in TOOLS if tool["name"] in {
+    "search_discussions", "read_discussion"}] + PR_DISCUSSION_TOOLS + [WEB_SEARCH_TOOL]
+VERIFIER_TOOLS = list(TOOLS) + PR_DISCUSSION_TOOLS + [WEB_SEARCH_TOOL]
+LIVE_RESEARCH_TOOL_NAMES = {"search_discussions", "read_discussion",
+                            "read_current_pr_discussion", "read_github_discussion"}
 FINISH_WITH_AVAILABLE_EVIDENCE = (
     "Budget is near the review limit. Do not call tools. Finish now with the "
     "evidence already available, and preserve uncertainty for any claim that "
@@ -148,6 +181,7 @@ def response_record(result, payload, elapsed):
             "usage_known": input_tokens is not None and output_tokens is not None,
             "usage_complete": (input_tokens is not None and output_tokens is not None
                                and cache_write_tokens is not None),
+            "web_search_calls": web_search_calls(result),
             "reasoning_tokens": (usage.get("output_tokens_details") or {}).get(
                 "reasoning_tokens")}
 
@@ -182,6 +216,11 @@ def output_text(output):
                      if item.get("type") == "message"
                      for part in item.get("content", [])
                      if part.get("type") == "output_text")
+
+
+def hosted_search_outputs(result):
+    return [item for item in result.get("output", [])
+            if isinstance(item, dict) and item.get("type") == "web_search_call"]
 
 
 def run_audit(api_key, name, prompt, review, prompt_config, notes="", on_response=None,
@@ -250,9 +289,10 @@ def openai_review(api_key, review, snapshot, bot_config, prompt_config, debug=No
     model = prompt_config.models["independent"] if model is None else model
     tools = TOOLS if tools is None else tools
     if not allow_discussions:
-        tools = [tool for tool in tools if tool["name"] not in
-                 {"search_discussions", "read_discussion"}]
-    allowed_tools = {tool["name"] for tool in tools}
+        tools = [tool for tool in tools
+                 if tool.get("name") not in LIVE_RESEARCH_TOOL_NAMES
+                 and tool.get("type") not in WEB_SEARCH_TOOL_TYPES]
+    allowed_tools = {tool["name"] for tool in tools if tool.get("type") == "function"}
     checkout = snapshot.checkout
     files = snapshot.head_files
     inputs = [{"role": "user", "content": review}]
@@ -283,6 +323,12 @@ def openai_review(api_key, review, snapshot, bot_config, prompt_config, debug=No
                 "instructions": prompt, "input": inputs, "tools": tools,
                 "tool_choice": tool_choice,
                 "max_output_tokens": max_output_tokens}
+        if (tool_choice != "none"
+                and any(tool.get("type") in WEB_SEARCH_TOOL_TYPES for tool in tools)):
+            per_response_search_limit = min(
+                MAX_WEB_SEARCH_CALLS_PER_RESPONSE, max(1, max_tool_calls - calls_used))
+            data["max_tool_calls"] = per_response_search_limit
+            data["include"] = ["web_search_call.action.sources"]
         if response_schema is not None:
             data["text"] = {"format": {"type": "json_schema",
                                         "name": stage_name, "strict": True,
@@ -304,7 +350,12 @@ def openai_review(api_key, review, snapshot, bot_config, prompt_config, debug=No
                 raise
             final_inputs = inputs + [{"role": "user",
                                       "content": FINISH_WITH_AVAILABLE_EVIDENCE}]
-            data = {**data, "input": final_inputs, "tool_choice": "none"}
+            final_tools = [tool for tool in tools
+                           if tool.get("type") not in WEB_SEARCH_TOOL_TYPES]
+            data = {**data, "input": final_inputs, "tool_choice": "none",
+                    "tools": final_tools}
+            data.pop("max_tool_calls", None)
+            data.pop("include", None)
             input_data = json.dumps(final_inputs).encode()
             sent_tool_choice = "none"
             budget_forced_final = True
@@ -355,6 +406,38 @@ def openai_review(api_key, review, snapshot, bot_config, prompt_config, debug=No
                     "reason")
             raise ValueError("OpenAI response did not complete")
         output = result.get("output", [])
+        hosted_search_items = hosted_search_outputs(result)
+        calls_used += len(hosted_search_items)
+        if debug is not None:
+            for item in hosted_search_items:
+                action = item.get("action") if isinstance(item.get("action"), dict) else {}
+                tool_record = {
+                    "name": "web_search",
+                    "arguments": json.dumps(action, sort_keys=True)[:160],
+                    "arguments_sha256": hashlib.sha256(
+                        json.dumps(action, sort_keys=True).encode()).hexdigest(),
+                    "output_bytes": 0,
+                    "output_sha256": hashlib.sha256(b"").hexdigest(),
+                    "hosted": True,
+                    "action_type": str(action.get("type") or "unknown")[:100],
+                    "retrieved_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                }
+                sources = action.get("sources")
+                if isinstance(sources, list):
+                    normalized = []
+                    for source in sources[:10]:
+                        if isinstance(source, str):
+                            normalized.append({"url": source})
+                        elif isinstance(source, dict):
+                            record = {
+                                key: source[key] for key in ("type", "url", "title")
+                                if isinstance(source.get(key), str)
+                            }
+                            if record:
+                                normalized.append(record)
+                    if normalized:
+                        tool_record["sources"] = normalized
+                debug["tools"].append(tool_record)
         calls = [item for item in output if item.get("type") == "function_call"]
         if calls:
             inputs.extend(output)
@@ -382,7 +465,7 @@ def openai_review(api_key, review, snapshot, bot_config, prompt_config, debug=No
                                                args.get("path"), args.get("start_line"))
                         elif call["name"] == "search_code":
                             answer = search_code(checkout, snapshot.head_sha, args.get("query"))
-                        elif call["name"] in {"search_discussions", "read_discussion"}:
+                        elif call["name"] in LIVE_RESEARCH_TOOL_NAMES:
                             if current_pr is None:
                                 answer = "Discussion lookup unavailable without the current PR number."
                             elif context_calls >= MAX_CONTEXT_CALLS:
@@ -391,8 +474,16 @@ def openai_review(api_key, review, snapshot, bot_config, prompt_config, debug=No
                                 context_calls += 1
                                 if call["name"] == "search_discussions":
                                     answer = forgejo.search_discussions(bot_config, args.get("query"), current_pr)
-                                else:
+                                elif call["name"] == "read_discussion":
                                     answer = forgejo.read_discussion(bot_config, args.get("number"), current_pr)
+                                elif call["name"] == "read_current_pr_discussion":
+                                    answer = forgejo.read_current_pr_discussion(
+                                        bot_config, current_pr, args.get("kind"),
+                                        args.get("page"), args.get("review_id"))
+                                else:
+                                    answer = forgejo.read_github_discussion(
+                                        bot_config, args.get("url"), args.get("kind"),
+                                        args.get("page"))
                         elif call["name"] in {"blame_base", "read_commit"}:
                             if history_calls >= MAX_HISTORY_CALLS:
                                 answer = "History lookup limit reached."
@@ -423,11 +514,17 @@ def openai_review(api_key, review, snapshot, bot_config, prompt_config, debug=No
                         "output_bytes": len(answer.encode()),
                         "output_sha256": hashlib.sha256(answer.encode()).hexdigest(),
                     }
+                    if call.get("name") in LIVE_RESEARCH_TOOL_NAMES and not skipped:
+                        tool_record["retrieved_at"] = time.strftime(
+                            "%Y-%m-%dT%H:%M:%SZ", time.gmtime())
                     if skipped:
                         tool_record["skipped"] = "inspection_limit"
                     debug["tools"].append(tool_record)
             continue
         text = output_text(output)
+        if hosted_search_items and not text.strip():
+            inputs.extend(output)
+            continue
         if stage_debug is not None:
             stage_debug["raw_output"] = text
         if not text.strip():

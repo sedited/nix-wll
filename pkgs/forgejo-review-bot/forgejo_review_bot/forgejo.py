@@ -1,11 +1,20 @@
 """Forgejo API access, public discussion reads, and review comments."""
+from datetime import datetime, timezone
 import json
+import urllib.error
 import urllib.parse
 import urllib.request
 
 from .repository import MAX_TOOL_BYTES, current_head
 
 MAX_DISCUSSION_RESPONSE_BYTES = 500_000
+MAX_COMMENT_PAGES = 1000
+DISCUSSION_PAGE_LIMIT = 10
+
+
+def _retrieved_at():
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace(
+        "+00:00", "Z")
 
 def forgejo_request(bot_config, token, path, method="GET", data=None):
     headers = {"Authorization": f"token {token}", "Accept": "application/json",
@@ -101,6 +110,229 @@ def read_discussion(bot_config, number, current_pr):
         if len((result + item).encode()) > MAX_TOOL_BYTES:
             return result + "[Comments truncated]"
         result += item
+    return result
+
+def _comment_author(comment):
+    return ((comment.get("user") or {}).get("login")
+            or comment.get("original_author") or "unknown")
+
+
+def _is_bot_comment(comment, bot_config):
+    body = str(comment.get("body") or comment.get("content") or "")
+    user = comment.get("user") if isinstance(comment.get("user"), dict) else {}
+    login = str(user.get("login") or "")
+    kind = str(user.get("type") or "")
+    return (bot_config.comment_marker in body or kind.lower() == "bot"
+            or login.endswith("[bot]"))
+
+
+def _append_comments(result, comments, bot_config, *, limit=DISCUSSION_PAGE_LIMIT):
+    if not isinstance(comments, list):
+        return result + "Forgejo returned invalid comments.\n"
+    human = [comment for comment in comments if isinstance(comment, dict)
+             and not _is_bot_comment(comment, bot_config)]
+    selected = human[:limit]
+    result += f"Comments on this page ({len(selected)} of {len(human)} non-bot):\n"
+    seen = set()
+    for comment in selected:
+        if comment.get("id") in seen:
+            continue
+        seen.add(comment.get("id"))
+        author = _comment_author(comment)
+        identifier = comment.get("id")
+        identifier_text = f" id={identifier}" if identifier is not None else ""
+        body = str(comment.get("body") or comment.get("content") or "")
+        content = body[:1500] + ("\n[Comment truncated]" if len(body) > 1500 else "")
+        url = (comment.get("html_url") or comment.get("pull_request_url")
+               or f"{bot_config.repository_url}/pulls")
+        item = f"{author}{identifier_text} ({url}): {content}\n"
+        if len((result + item).encode()) > MAX_TOOL_BYTES:
+            return result + "[Comments truncated]\n"
+        result += item
+    return result
+
+
+def _public_discussion_page(bot_config, path, *, page, limit=DISCUSSION_PAGE_LIMIT):
+    separator = "&" if "?" in path else "?"
+    try:
+        items = public_discussion_request(
+            bot_config, f"{path}{separator}limit={limit}&page={page}")
+    except (ValueError, urllib.error.HTTPError, urllib.error.URLError, TimeoutError):
+        return None, True
+    if not isinstance(items, list):
+        return None, True
+    return items, len(items) == limit
+
+
+def _slice_page(items, page, limit=DISCUSSION_PAGE_LIMIT):
+    start = (page - 1) * limit
+    selected = items[start:start + limit]
+    return selected, len(items) > start + limit
+
+
+def read_current_pr_discussion(bot_config, number, kind="comments", page=1,
+                               review_id=0):
+    if (not isinstance(number, int) or isinstance(number, bool)
+            or not 1 <= number <= 10_000_000):
+        return "Invalid pull request number."
+    if (not isinstance(page, int) or isinstance(page, bool)
+            or not 1 <= page <= MAX_COMMENT_PAGES):
+        return f"Page must be 1 to {MAX_COMMENT_PAGES}."
+    if kind not in {"comments", "inline", "reviews"}:
+        return "Kind must be comments, inline, or reviews."
+    if (not isinstance(review_id, int) or isinstance(review_id, bool)
+            or review_id < 0):
+        return "review_id must be a nonnegative integer."
+    if kind == "inline" and review_id < 1:
+        return "Use kind=reviews first, then pass a positive review_id for inline comments."
+    try:
+        issue = public_discussion_request(bot_config, f"/issues/{number}")
+    except ValueError:
+        return "Current PR discussion is unavailable or exceeds the context limit."
+    if not isinstance(issue, dict) or issue.get("number") != number:
+        return "Forgejo returned an invalid current PR discussion."
+    title = str(issue.get("title") or "")[:300]
+    raw_body = str(issue.get("body") or "")
+    body = raw_body[:4000] + ("\n[Description truncated]" if len(raw_body) > 4000 else "")
+    result = (f"Current PR #{number}: {title}\n"
+              f"{bot_config.repository_url}/pulls/{number}\n"
+              f"Retrieved at: {_retrieved_at()}\n"
+              f"Description:\n{body}\n")
+    if len(result.encode()) > MAX_TOOL_BYTES:
+        return (result.encode()[:MAX_TOOL_BYTES].decode(errors="replace")
+                + "\n[Description truncated]\n")
+    if kind == "comments":
+        comments, truncated = _public_discussion_page(
+            bot_config, f"/issues/{number}/comments", page=page)
+        result += f"Issue comments page {page}:\n"
+        result = _append_comments(result, comments, bot_config)
+    elif kind == "inline":
+        truncated = True
+        try:
+            comments = public_discussion_request(
+                bot_config, f"/pulls/{number}/reviews/{review_id}/comments")
+        except (ValueError, urllib.error.HTTPError, urllib.error.URLError, TimeoutError):
+            comments = None
+            truncated = True
+        if isinstance(comments, list):
+            comments, truncated = _slice_page(comments, page)
+        result += f"Inline review comments for review {review_id}, page {page}:\n"
+        result = _append_comments(result, comments, bot_config)
+    else:
+        reviews, truncated = _public_discussion_page(
+            bot_config, f"/pulls/{number}/reviews", page=page)
+        result += f"Pull review summaries page {page}:\n"
+        result = _append_comments(result, reviews, bot_config)
+    if truncated:
+        result += f"{kind} may continue on page {page + 1}.\n"
+    return result
+
+
+def _github_api(path):
+    request = urllib.request.Request(
+        "https://api.github.com" + path,
+        headers={"Accept": "application/vnd.github+json",
+                 "User-Agent": "ForgejoReviewBot/1.0"},
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        content = response.read(MAX_DISCUSSION_RESPONSE_BYTES + 1)
+    if len(content) > MAX_DISCUSSION_RESPONSE_BYTES:
+        raise ValueError("GitHub response exceeds context limit")
+    return json.loads(content)
+
+
+def _parse_github_issue_url(url):
+    if not isinstance(url, str) or not url.startswith("https://github.com/"):
+        return None
+    parts = urllib.parse.urlsplit(url)
+    if parts.scheme != "https" or parts.netloc != "github.com":
+        return None
+    path = [part for part in parts.path.split("/") if part]
+    if len(path) < 4 or path[2] not in {"pull", "pulls", "issues"}:
+        return None
+    try:
+        number = int(path[3])
+    except ValueError:
+        return None
+    owner, repo = path[0], path[1]
+    if not owner.replace("-", "").replace("_", "").isalnum():
+        return None
+    if not repo.replace("-", "").replace("_", "").replace(".", "").isalnum():
+        return None
+    return owner, repo, number
+
+
+def _github_page(path, *, page, per_page=DISCUSSION_PAGE_LIMIT):
+    separator = "&" if "?" in path else "?"
+    try:
+        items = _github_api(f"{path}{separator}per_page={per_page}&page={page}")
+    except (ValueError, urllib.error.HTTPError, urllib.error.URLError, TimeoutError):
+        return None, True
+    if not isinstance(items, list):
+        return None, True
+    return items, len(items) == per_page
+
+
+def _github_fragment_comment(base, fragment):
+    if not isinstance(fragment, str):
+        return None, False
+    try:
+        if fragment.startswith("discussion_r"):
+            identifier = int(fragment.removeprefix("discussion_r"))
+            return _github_api(f"{base}/pulls/comments/{identifier}"), True
+        if fragment.startswith("issuecomment-"):
+            identifier = int(fragment.removeprefix("issuecomment-"))
+            return _github_api(f"{base}/issues/comments/{identifier}"), True
+    except (ValueError, urllib.error.HTTPError, urllib.error.URLError, TimeoutError):
+        return None, True
+    return None, False
+
+
+def read_github_discussion(bot_config, url, kind="comments", page=1):
+    parsed = _parse_github_issue_url(url)
+    if parsed is None:
+        return "URL must be a public GitHub pull or issue URL."
+    if (not isinstance(page, int) or isinstance(page, bool)
+            or not 1 <= page <= MAX_COMMENT_PAGES):
+        return f"Page must be 1 to {MAX_COMMENT_PAGES}."
+    if kind not in {"comments", "inline", "reviews"}:
+        return "Kind must be comments, inline, or reviews."
+    owner, repo, number = parsed
+    base = f"/repos/{owner}/{repo}"
+    fragment = urllib.parse.urlsplit(url).fragment
+    try:
+        issue = _github_api(f"{base}/issues/{number}")
+    except (ValueError, urllib.error.HTTPError, urllib.error.URLError, TimeoutError):
+        return "GitHub discussion is unavailable or exceeds the context limit."
+    title = str(issue.get("title") or "")[:300] if isinstance(issue, dict) else ""
+    raw_body = str(issue.get("body") or "") if isinstance(issue, dict) else ""
+    body = raw_body[:4000] + ("\n[Description truncated]" if len(raw_body) > 4000 else "")
+    result = (f"GitHub discussion {owner}/{repo} #{number}: {title}\n"
+              f"https://github.com/{owner}/{repo}/pull/{number}\n"
+              f"Retrieved at: {_retrieved_at()}\n"
+              f"Description:\n{body}\n")
+    fragment_comment, had_fragment = _github_fragment_comment(base, fragment)
+    if had_fragment:
+        result += "GitHub referenced comment:\n"
+        result = _append_comments(
+            result, [fragment_comment] if isinstance(fragment_comment, dict) else None,
+            bot_config)
+        return result
+    if kind == "comments":
+        comments, truncated = _github_page(
+            f"{base}/issues/{number}/comments", page=page)
+        result += f"GitHub issue comments page {page}:\n"
+    elif kind == "inline":
+        comments, truncated = _github_page(
+            f"{base}/pulls/{number}/comments", page=page)
+        result += f"GitHub inline review comments page {page}:\n"
+    else:
+        comments, truncated = _github_page(
+            f"{base}/pulls/{number}/reviews", page=page)
+        result += f"GitHub review summaries page {page}:\n"
+    result = _append_comments(result, comments, bot_config)
+    if truncated:
+        result += f"GitHub {kind} may continue on page {page + 1}.\n"
     return result
 
 def pull_request_context(bot_config, token, number):
