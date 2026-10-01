@@ -145,6 +145,28 @@ and configuration. Each review run has a distinct URL, and publication retries
 reuse it. If a report cannot be written, the review is published without a
 report link. Existing comments and private traces are not backfilled.
 
+When reports are configured, a timer also refreshes `reportDir/stats/index.html`
+and its public JSON download every five minutes. The dashboard reads durable
+review jobs and both spend ledgers without model calls or credentials. It ranks
+agents and models by verifier-accepted findings, separates sole and shared
+contributions, and shows execution opportunities, candidate dispositions,
+coverage, routing, token usage, costs, and review details. Shared findings earn
+credit for each contributing agent, so leaderboard counts overlap.
+
+Distinct review jobs and paid request attempts are counted separately. Retries
+increase request counts and ledger spend; they do not duplicate the final
+findings. Known costs and unsettled reservations are shown separately, including
+failed requests. Verifier acceptance is not human validation or a recall
+measurement, and summed model time is not elapsed review time.
+
+The page is reachable under the report URL's `stats/` subdirectory. Hosts may
+also serve `reportDir/stats` at a shorter URL such as `/stats/`. To refresh it
+manually without waiting for the timer:
+
+```sh
+systemctl start forgejo-review-bot-stats.service
+```
+
 To force a fresh review of the same head, send a signed synthetic pull request
 webhook with `"review_bot_force": true`. Normal Forgejo webhooks omit this field.
 A forced review receives a new allowance. Changing prompts does not

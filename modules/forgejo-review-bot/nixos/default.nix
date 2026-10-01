@@ -10,6 +10,11 @@ let
   defaultPackage = pkgs.callPackage ../../../pkgs/forgejo-review-bot { };
   defaultMarker = "<!-- forgejo-review-bot:${cfg.repository} -->";
   commentMarker = if cfg.commentMarker == null then defaultMarker else cfg.commentMarker;
+  repositoryUrl =
+    if cfg.repositoryUrl != null then
+      cfg.repositoryUrl
+    else
+      builtins.replaceStrings [ "/api/v1/repos/" ] [ "/" ] cfg.forgejoApi;
   args = [
     "--listen"
     cfg.listenAddress
@@ -281,6 +286,45 @@ in
       home = cfg.stateDir;
     };
     users.groups.${cfg.group} = { };
+
+    systemd.services.forgejo-review-bot-stats =
+      lib.mkIf (cfg.reportDir != null && cfg.reportBaseUrl != null)
+        {
+          description = "Publish Forgejo review statistics";
+          serviceConfig = {
+            Type = "oneshot";
+            User = cfg.user;
+            Group = cfg.group;
+            ExecStart = "${cfg.package}/bin/forgejo-review-bot-evaluate ${
+              lib.escapeShellArgs [
+                "stats"
+                "--state-dir"
+                cfg.stateDir
+                "--report-dir"
+                cfg.reportDir
+                "--repository-url"
+                repositoryUrl
+                "--report-base-url"
+                cfg.reportBaseUrl
+              ]
+            }";
+            ProtectSystem = "strict";
+            ProtectHome = true;
+            ReadWritePaths = [ cfg.reportDir ];
+            NoNewPrivileges = true;
+            PrivateTmp = true;
+          };
+        };
+
+    systemd.timers.forgejo-review-bot-stats =
+      lib.mkIf (cfg.reportDir != null && cfg.reportBaseUrl != null)
+        {
+          wantedBy = [ "timers.target" ];
+          timerConfig = {
+            OnBootSec = "1m";
+            OnUnitActiveSec = "5m";
+          };
+        };
 
     systemd.services.forgejo-review-bot = {
       description = "Forgejo pull request review bot";

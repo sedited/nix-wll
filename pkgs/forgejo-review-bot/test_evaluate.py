@@ -12,6 +12,22 @@ from unittest.mock import patch
 from forgejo_review_bot import config, evaluate, forgejo, pipeline, spend
 
 
+class StatsCliTests(unittest.TestCase):
+    def test_stats_command_writes_a_dashboard_without_credentials_or_state_mutation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = root / "missing-state"
+            reports = root / "public"
+            self.assertEqual(evaluate.main([
+                "stats", "--state-dir", str(state), "--report-dir", str(reports),
+                "--repository-url", "https://git.example.org/owner/repo",
+                "--report-base-url", "https://review.example.org/traces",
+            ]), 0)
+            self.assertTrue((reports / "stats" / "index.html").is_file())
+            json.loads((reports / "stats" / "stats.json").read_text())
+            self.assertFalse(state.exists())
+
+
 class EvaluateTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

@@ -333,6 +333,7 @@ summary {{ cursor: pointer; font-weight: 600; }}
 <h1>Forgejo Review Report</h1>
 <p>PR #{_escape(record['pr'])} at <code>{_escape(record['head'])}</code></p>
 <p><a href="{_escape(json_name)}" download>Download JSON report</a></p>
+<p><a href="stats/">Review statistics</a></p>
 </header>
 <p class="notice">{_escape(record['notice'])}</p>
 <section>

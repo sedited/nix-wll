@@ -14,7 +14,7 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import config, forgejo, pipeline, repository, spend, trace
+from . import config, forgejo, pipeline, repository, spend, stats, stats_page, trace
 
 
 SCHEMA_VERSION = 1
@@ -584,6 +584,11 @@ def main(argv=None):
     summarize = commands.add_parser("summarize",
                                     help="summarize saved run JSON artifacts")
     summarize.add_argument("runs", type=Path, nargs="+")
+    dashboard = commands.add_parser("stats", help="write public production review statistics")
+    dashboard.add_argument("--state-dir", type=Path, required=True)
+    dashboard.add_argument("--report-dir", type=Path, required=True)
+    dashboard.add_argument("--repository-url", required=True)
+    dashboard.add_argument("--report-base-url", required=True)
     args = parser.parse_args(argv)
 
     if args.command == "capture":
@@ -605,6 +610,11 @@ def main(argv=None):
         return 0
     if args.command == "summarize":
         print(json.dumps(summarize_runs(args.runs), sort_keys=True))
+        return 0
+    if args.command == "stats":
+        summary = stats.collect_stats(args.state_dir, args.report_dir)
+        stats_page.save_stats(args.report_dir / "stats", summary,
+                              args.repository_url, args.report_base_url)
         return 0
 
     api_key = read_secret(args.openai_key_file, "OpenAI key")
