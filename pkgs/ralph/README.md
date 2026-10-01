@@ -21,7 +21,7 @@ flowchart TD
     workers --> collect["Fetch current branch or pinned historical base and collect merge-base/head snapshot"]
     collect --> existing{"Same base and head already reviewed?"}
     existing -->|yes| done["Complete without model calls"]
-    existing -->|no| pipeline["Route, discover, research, verify and edit"]
+    existing -->|no| pipeline["Route, assess concept, discover, verify and edit"]
     pipeline --> saved["Save result before publication"]
     saved --> report["Optional public HTML and JSON report"]
     report --> publish["Create or update one bot comment per PR"]
@@ -93,7 +93,8 @@ profile lists are valid when no coverage applies. Routine does not mean no revie
 
 ```mermaid
 flowchart TD
-    route["Router: gpt-6-luna"] --> independent["Independent overview: gpt-6-luna"]
+    route["Router: gpt-6-luna"] --> archaeology["Archaeologist: gpt-6-luna / review input, code and research"]
+    archaeology --> independent["Independent overview: gpt-6-luna"]
     independent --> sensitive{"Sensitive tier?"}
     sensitive -->|yes| pair["Concurrent adversarial passes: same evidence and profiles"]
     pair --> sol["adversarial: gpt-6.1-sol / OpenAI"]
@@ -102,9 +103,8 @@ flowchart TD
     glm --> focused
     sensitive -->|no| focused
     focused --> order["concurrency → state → public_contract → build → tests → design"]
-    order --> archaeology["Archaeologist: gpt-6-luna / discussion and web research"]
-    archaeology --> verifier["Verifier: gpt-6-luna / code and research evidence"]
-    verifier --> accepted{"Accepted findings or conceptual concern?"}
+    order --> verifier["Verifier: gpt-6-luna / code and research evidence"]
+    verifier --> accepted{"Accepted findings or supported concept assessment?"}
     accepted -->|yes| collator["Collator: gpt-6-luna / verified prose only"]
     accepted -->|no| render["Python renders concept, findings and coverage limitations"]
     collator --> render
@@ -113,9 +113,12 @@ flowchart TD
 Skipped audits do not make model calls. Escalation can add pending stages during
 discovery. Sol and GLM run concurrently when a PPQ key is supplied; without that
 key, the Python pipeline runs Sol alone. The service CLI requires both keys.
+The archaeologist runs after routing and before code discovery. Its assessment
+is advisory only: negative, failed or incomplete concept research never skips an
+independent, adversarial or focused code stage selected for the review.
 Reviewers do not see other discovery passes' candidates. The verifier sees the
-pooled candidates, original review input and archaeology brief. Code discovery
-does not receive the archaeology brief or current PR discussion.
+pooled candidates, original review input and archaeology candidate. Code
+discovery does not receive the archaeology output or current PR discussion.
 
 | Stage | Default model | Reasoning effort | Per-response output token ceiling | Evidence access |
 | --- | --- | --- | --- | --- |
@@ -126,16 +129,18 @@ does not receive the archaeology brief or current PR discussion.
 | concurrency | gpt-6-luna | medium | 8,000 | Focused input and code tools |
 | state, public_contract, build, tests | gpt-6-luna | low | 4,000 | Focused input and code tools |
 | design | gpt-6-luna | xhigh | 25,000 | Focused input, code tools and merge-base developer notes |
-| verifier, routine/standard | gpt-6-luna | low | 8,000 | Original input, candidates, archaeology brief, code and research tools |
-| verifier, sensitive | gpt-6-luna | high | 25,000 | Original input, candidates, archaeology brief, code and research tools |
-| archaeologist | gpt-6-luna | low | 4,000 | PR context, discussion and web research; no code tools |
+| verifier, routine/standard | gpt-6-luna | low | 8,000 | Original input, candidates, concept candidate, code and research tools |
+| verifier, sensitive | gpt-6-luna | high | 25,000 | Original input, candidates, concept candidate, code and research tools |
+| archaeologist | gpt-6-luna | low | 4,000 | Original input, base/head code tools, current discussion and research tools |
 | collator | gpt-6-luna | low | 6,000 | Accepted findings and conceptual assessment; no tools |
 
 Code tools find paths, read head/base files, read diffs and search code. The full
 tool set also reads base history and other PR discussions. Current PR discussion
 is excluded from code discovery. The archaeologist and verifier can read current
-discussion and original upstream review threads. Frozen evaluations disable live
-research and skip archaeology because their manifests do not capture discussions.
+discussion and original upstream review threads. Frozen evaluations replay only
+captured research evidence and disable live discussion or web fallback. If a
+research call is missing from the frozen manifest, the tool returns an
+unavailable-evidence message and the model continues from code and frozen input.
 
 Discovery allows 12 tool calls at routine tier, 24 at standard, and 48 at sensitive.
 Both adversarial passes and verification allow 48. History and discussion
@@ -143,9 +148,10 @@ sublimits are eight each per tool-enabled stage. Archaeology has twelve total
 inspections. Hosted web actions count toward the stage limit and are capped at
 two per response. Search fees and evidence-token headroom are reserved in the
 existing OpenAI allowance; opening or finding text within a page is not a paid
-search action. Independent, adversarial and
-verifier stages require a first inspection. At limits, a final turn uses collected
-evidence and must preserve uncertainty.
+search action. The early concept stage spends from the same capped review
+allowance, does not estimate savings and never stops later code stages.
+Independent, adversarial and verifier stages require a first inspection. At
+limits, a final turn uses collected evidence and must preserve uncertainty.
 
 OpenAI's default estimated review allowance is USD 1.00; PPQ has a separate
 USD 0.50 allowance. Routing and discovery protect OpenAI verifier headroom,
@@ -163,7 +169,7 @@ Sources: [pipeline.py](ralph/pipeline.py),
 
 ```mermaid
 flowchart TD
-    archaeology["Archaeologist: sourced conceptual brief"] --> conceptcheck["Verifier checks historical claims and technical premises"]
+    archaeology["Archaeologist: sourced concept candidate"] --> conceptcheck["Verifier checks historical claims and technical premises"]
     conceptcheck --> conceptdecision{"Supported conceptual assessment?"}
     conceptdecision -->|yes| concept["Separate assessment: no severity or code location"]
     conceptdecision -->|no| withheld["Withhold assessment; retain valid findings"]
@@ -180,6 +186,7 @@ flowchart TD
     finding --> check{"Published finding passes Python validation?"}
     check -->|no| unresolved
     check -->|yes| accepted["Assign finding:N ID; accept"]
+    verifier --> reviewed["Record candidate and verified review recommendation"]
     verifier --> new["Verifier may discover a new issue with no candidate IDs"]
     new --> finding
     accepted --> edit["Collator edits verified findings and conceptual prose"]
@@ -194,7 +201,9 @@ flowchart TD
 Candidate findings are leads, not votes. Agreement between Sol, GLM and focused
 reviewers gives a claim no extra weight. A defect needs a reachable trigger and
 consequence, checked against the strongest code-based reason it might be false.
-Static proof can suffice; running a reproduction is not required.
+Static proof can suffice; running a reproduction is not required. Defect
+discovery remains independent of the concept assessment, PR discussion and
+upstream review threads.
 
 Design findings need an established premise and material tradeoff. A grounded
 question can survive even when the implementation is correct and the author must
@@ -231,13 +240,14 @@ Sources: [protocol.py](ralph/protocol.py),
 
 ## Concept and history
 
-The archaeologist receives the PR rationale, commit summaries and changed paths
-without the patch. It researches whether the proposed outcome is worth pursuing and
-which approach has the strongest support. It establishes the problem, the cost
-of doing nothing, the benefit delivered by the submitted proposal, and relevant
-prior attempts. It compares the proposal with the baseline and up to two
-credible alternatives, identifying where each alternative came from. Promised
-follow-ups do not count as delivered benefits.
+The archaeologist receives the full review input plus base/head code tools. It
+runs after routing and before independent discovery. It researches whether the
+proposed goal and approach are worth pursuing, while code review continues no
+matter what it recommends. It establishes the problem, the cost of doing
+nothing, the benefit delivered by the submitted proposal, and relevant prior
+attempts. It compares the proposal with the baseline and up to two credible
+alternatives, identifying where each alternative came from. Promised follow-ups
+do not count as delivered benefits.
 
 Research follows explicit references before searching more broadly. Discussion
 reads use bounded pages and can fetch a linked GitHub comment directly. Returned
@@ -247,22 +257,37 @@ claims need source links. Earlier objections must be checked for later answers;
 an abandoned PR does not establish that its concept was rejected. Skepticism
 applies to the status quo and suggested alternatives as well as the proposal.
 The brief records technical assumptions for the verifier, a conditional
-recommendation, and the question or evidence most likely to change it. It does
-not perform another code audit or produce ACK/NACK labels.
+recommendation, and the question or evidence most likely to change it. Its
+structured proposal includes `goal`, an `assessment` of `worth_pursuing`,
+`needs_motivation`, `rework_approach` or `not_worth_pursuing`, and an advisory
+`proposed_review` of `continue`, `would_stop` or `undetermined` with a
+`review_reason`. It does not produce code findings, assign severity or emit
+ACK/NACK labels.
+
+After a valid concept candidate, blind alternatives are enabled by default. This
+uses the existing archaeologist model with base-only code tools and neutral
+problem, goal and baseline inputs. Its result goes to the verifier, not to
+discovery. The pipeline still runs every selected code stage.
 
 The verifier checks the premises before accepting a separate conceptual
-assessment. This assessment has no finding ID, severity or artificial source
-location. The collator can edit it even when there are no accepted code findings.
-The public review includes "Concept and approach" only for a supported objection
-or a materially better alternative. Sound approaches produce no concept section.
-A question belongs here only if its answer settles a specific material concern.
-The full research brief remains in the report. Invalid or unverified assessments are
+assessment. It records both the archaeologist's proposed review recommendation
+and its own final recommendation. This assessment has no finding ID, severity or
+artificial source location. The collator can edit it even when there are no
+accepted code findings. The existing collator remains the only writing pass. At
+least initially, the public review includes a concise "Concept and approach"
+section for supported positive or negative assessments, with meaningful
+alternatives and remaining uncertainty. A question belongs here only if its
+answer settles a specific material concern. The full research brief and fuller
+alternatives detail remain in the report. Invalid or unverified assessments are
 withheld. Failed editing falls back to verified wording.
 
-Reports and statistics count published conceptual concerns separately from
-findings and distinguish them from completed research.
-Archaeology usage and costs remain visible, but the stage does not compete in
-the finding leaderboard. These counts measure output, not recommendation quality.
+Reports and statistics count published concept assessments separately from
+findings and distinguish them from completed research. They also expose
+candidate and verifier review recommendations so a human can score false
+proposed stops and useful code findings that appeared after a `would_stop`
+recommendation. Archaeology usage and costs remain visible, but the stage does
+not compete in the finding leaderboard. These counts measure output, not
+recommendation quality.
 For a before/after comparison, use the same PR head and inspect whether the new
 assessment recovers material history, recognises answered objections, and makes
 a defensible choice between approaches. A live rerun can see newer discussion;

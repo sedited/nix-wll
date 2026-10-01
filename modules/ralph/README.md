@@ -21,9 +21,11 @@ the shared monthly allowance.
 
 The model can also search and read other public issues and pull requests in the
 same repository, including a small sample of ordinary comments. The current PR
-is excluded from code discovery. A separate Luna archaeologist researches the
-current discussion, original upstream reviews, previous attempts and alternatives.
-Its brief goes to the verifier after independent code discovery.
+is excluded from code discovery. After routing and before independent code
+discovery, a separate Luna archaeologist receives the full review input, base
+and head code tools, current discussion, original upstream reviews, previous
+attempts and alternatives. Its concept candidate goes to the verifier with the
+pooled code candidates.
 These reads use no Forgejo credentials and are limited to eight calls per
 tool-enabled stage.
 It can inspect up to 20 lines of merge-base blame and read a related ancestor
@@ -44,7 +46,8 @@ to both reviews. Concurrency covers C++ lifetime, locks and shared state; state
 covers persistence and recovery. Public-contract and build audits cover exposed
 behavior and portability respectively. These correctness checks run before
 tests and design. Reviewers can escalate when inspection reveals sensitive
-behavior. Independent reviewers never receive each other's candidates.
+behavior. Independent reviewers never receive each other's candidates. They also
+never receive the archaeology output or current PR discussion.
 
 The tests audit starts with changed production behavior and existing coverage,
 even when no tests changed. It then judges assertions, fixtures and runtime.
@@ -58,14 +61,26 @@ correct. It compares the claimed outcome with what the mechanism guarantees.
 Grounded design questions can be published when their factual premise is
 verified and the answer would settle a material tradeoff.
 
-The archaeologist returns a source-backed brief about the problem, baseline,
-delivered benefit, history and credible alternatives. It has no code tools.
-The verifier checks its decisive claims and technical assumptions before
-publishing a short "Concept and approach" concern, including when no code
-findings survive. Sound approaches produce no public concept section. Concerns
-must establish an unfavorable tradeoff or a materially better alternative; a
-question must settle a specific material concern. Unsupported assessments are withheld; editor failure retains
-the verified wording. The detailed brief appears in the full report.
+The archaeologist returns a source-backed concept candidate about the problem,
+baseline, delivered benefit, history and credible alternatives. It can inspect
+base and head code to check what the PR delivers, but it does not publish code
+findings or assign severity. Its `assessment` is one of `worth_pursuing`,
+`needs_motivation`, `rework_approach` or `not_worth_pursuing`; its advisory
+`proposed_review` is `continue`, `would_stop` or `undetermined`, with a
+`review_reason`. Negative, failed or incomplete archaeology never skips any
+selected code stage. The verifier checks decisive claims and technical
+assumptions before publishing a short "Concept and approach" assessment,
+including when no code findings survive. It also records its own final review
+recommendation. At least initially, normal Ralph comments include supported
+positive or negative concept assessments, meaningful alternatives and remaining
+uncertainty. The public comment stays concise; the detailed brief and fuller
+alternatives discussion appear in the full report. Unsupported assessments are
+withheld; editor failure retains the verified wording.
+
+After a valid concept candidate, blind alternatives are enabled by default. This
+uses the existing archaeologist model with base-only code tools and neutral
+problem, goal and baseline inputs. Its result goes to the verifier, not to
+discovery, and code review still runs every selected stage.
 
 The Luna design pass uses extra-high reasoning. Both adversarial reviews and
 Luna verification of sensitive reviews use high reasoning. These stages each
@@ -73,8 +88,9 @@ have a 25,000-token allowance per response for reasoning and visible output
 combined. This is initial headroom, not a measured optimum or a request for
 longer findings. Concurrency uses medium reasoning with 8,000 tokens. Other
 stages use low reasoning; ordinary verification retains 8,000 tokens.
-Debug output records the settings and actual usage. OpenAI stages share their per-review spending ceiling. GLM has its own
-USD 0.50 per-review ceiling and ledger.
+Debug output records the settings and actual usage. OpenAI stages share their
+per-review spending ceiling. GLM has its own USD 0.50 per-review ceiling and
+ledger.
 
 Accepted design concerns appear under "Design and approach", after critical
 bugs and before the remaining findings. Empty sections are omitted. The Luna
@@ -86,12 +102,15 @@ Routine discovery stages get up to 12 tool inspections, standard stages 24,
 and sensitive stages 48. The adversarial passes and verifier each get
 48. Archaeology gets twelve total inspections, including hosted web actions,
 with at most two hosted actions per response. Search charges are included in
-the OpenAI spending allowance. With an allowance of N inspections, the model can make up to N tool calls
-across at most N + 1 responses, leaving a final response without tools. The
-router and writing pass have no tools. The final response and all inspections
-remain subject to the spending ceiling. At the inspection limit, further reads
-are refused. The model returns supported findings and names material unanswered
-evidence. Debug output records the limit and which requests were skipped.
+the OpenAI spending allowance. The concept stage spends from the same capped
+review allowance as the OpenAI code stages, does not estimate savings and never
+stops later code stages. With an allowance of N inspections, the model can make
+up to N tool calls across at most N + 1 responses, leaving a final response
+without tools. The router and writing pass have no tools. The final response and
+all inspections remain subject to the spending ceiling. At the inspection limit,
+further reads are refused. The model returns supported findings and names
+material unanswered evidence. Debug output records the limit and which requests
+were skipped.
 
 Discovery stages return structured candidates. The verifier accounts for each
 candidate as published, dropped or unresolved, and the writing pass receives
@@ -137,9 +156,10 @@ Finding attribution is still recorded with the final title, discovering agents
 and their models, verifier and editor. Merged candidates retain all their
 source agents; a finding first discovered during verification is credited to
 the verifier. Editing never earns discovery credit. Per-stage summaries record
-candidate dispositions, accepted findings found solely or jointly, cost
-estimates and incomplete usage. Joint credit is not evidence that each agent
-was necessary, and verifier acceptance is not a human quality label.
+candidate dispositions, accepted findings found solely or jointly, concept
+recommendations, cost estimates and incomplete usage. Joint credit is not
+evidence that each agent was necessary, and verifier acceptance is not a human
+quality label.
 Adversarial records include selected profiles without attributing findings to
 an individual profile within the shared call. Private traces preserve full
 responses and per-request usage, including failures.
@@ -165,10 +185,12 @@ review jobs and both spend ledgers without model calls or credentials. It ranks
 agents and models by verifier-accepted findings, separates sole and shared
 contributions, and shows execution opportunities, candidate dispositions,
 coverage, routing, token usage, costs, and review details. Shared findings earn
-credit for each contributing agent, so leaderboard counts overlap. Conceptual
-concerns have separate saved/published counts and do not inflate finding
-counts. Archaeology costs and execution remain visible outside the finding
-leaderboard.
+credit for each contributing agent, so leaderboard counts overlap. Concept
+assessments have separate saved/published counts and do not inflate finding
+counts. Candidate and verifier `would_stop` counts are shown with downstream
+findings and costs so a human can judge false proposed stops and useful findings
+that appeared after a proposed stop. Archaeology costs and execution remain
+visible outside the finding leaderboard.
 
 Distinct review jobs and paid request attempts are counted separately. Retries
 increase request counts and ledger spend; they do not duplicate the final
@@ -317,24 +339,37 @@ ralph-evaluate capture \
 
 Capture retains complete Git objects in a dedicated evaluation checkout. The
 initial download can be large. Keep that checkout with the manifests.
-Replay reads frozen title/body, commit IDs, Git objects and prompt/model
-configuration; discussion tools, live web research and lazy Git downloads are
-disabled. Archaeology is skipped because frozen manifests do not capture its
-sources:
+Capture stores bounded current PR discussion by default. Use
+`--research-requests-json` to add exact prior discussion calls to the manifest,
+and `--research-cutoff` to cap visible discussion at an ISO timestamp. The
+requests file is a JSON list of objects with `name` and `arguments`; supported
+names are `search_discussions`, `read_discussion`,
+`read_current_pr_discussion` and `read_github_discussion`.
+Replay reads frozen title/body, commit IDs, Git objects, prompt/model
+configuration and captured research evidence. It disables live discussion, live
+web fallback and lazy Git downloads. If archaeology or verification asks for a
+research call that was not captured, the tool reports unavailable frozen
+evidence and the model continues from code and the frozen input:
 
 ```sh
 ralph-evaluate run \
   --state-dir ./evaluation-state --output-dir ./results \
   --openai-key-file /run/secrets/openai-key \
+  --ppq-key-file /run/secrets/ppq-key \
   --review-budget-usd 1.00 \
   ./cases/case-123-*.json
 ```
 
-Run supports `--prompt-file`, `--audit-prompt-dir`, `--models-json` and
-`--routing-mode` overrides. Each run gets a distinct private JSON artifact
-with effective configuration identity, raw stage results, usage, final comment
-and any failure. Optional `--labels-json` maps case IDs to expected findings;
-these labels are saved for comparison and never sent to reviewers.
+Run supports `--prompt-file`, `--audit-prompt-dir`, `--models-json`,
+`--routing-mode` and `--no-blind-alternatives` for ablation. Blind alternatives
+are on by default after a valid concept candidate. The blind run keeps the
+existing archaeologist model, gives it only base-side code tools and neutral
+problem, goal and baseline inputs, and sends the result to the final verifier
+rather than discovery. Each run gets a distinct private JSON artifact with
+effective configuration identity, raw stage results, research inventory, usage,
+final comment and any failure. Optional `--labels-json` maps case IDs to
+expected findings; these labels are saved for comparison and never sent to
+reviewers.
 
 Compare useful findings and missed known findings alongside cost, incomplete
 coverage and wall time. An empty review is not proof of a good route. Shadow
@@ -347,7 +382,8 @@ they do not automatically decide whether a finding is correct or useful.
 
 The service and evaluation run command require `--ppq-key-file`. Compare
 `adversarial` and `adversarial_glm` in debug stage metrics for sole/shared
-accepted findings and published, dropped or unresolved candidates. OpenAI has a USD 1.00 ceiling and GLM has a separate USD 0.50 ceiling; incomplete passes
-are not evidence of model quality.
+accepted findings and published, dropped or unresolved candidates. OpenAI has a
+USD 1.00 ceiling and GLM has a separate USD 0.50 ceiling; incomplete passes are
+not evidence of model quality.
 PPQ GLM rates use the model catalog input/output prices without cache discounts.
 See [PPQ integration guide](https://ppq.ai/llms.txt).
