@@ -21,6 +21,31 @@ class SpendTests(unittest.TestCase):
     def payload(output=100):
         return {"max_output_tokens": output, "input": "review"}
 
+    def test_web_search_reserves_limit_and_settles_search_actions(self):
+        ledger = Ledger(self.path, review_limit_usd=1, input_padding_tokens=0)
+        payload = {**self.payload(), "tools": [{"type": "web_search"}],
+                   "max_tool_calls": 3}
+        estimate = ledger.reserve_estimate_micros("gpt-6-luna", payload)
+        self.assertGreater(estimate, 30_000)
+        self.assertLess(ledger.reserve_estimate_micros(
+            "gpt-6-luna", {**payload, "tool_choice": "none"}), 1_000)
+        with self.assertRaisesRegex(ValueError, "max_tool_calls"):
+            ledger.reserve_estimate_micros(
+                "gpt-6-luna", {**self.payload(), "tools": payload["tools"]})
+        token = ledger.reserve("archaeologist", "gpt-6-luna", payload, "pr-1")
+        response = {"id": "search-response", "model": "gpt-6-luna",
+                    "usage": {"input_tokens": 100, "output_tokens": 10},
+                    "output": [{"type": "web_search_call", "action": {"type": action}}
+                               for action in ("search", "open_page", "find_in_page", "search")]}
+        ledger.settle(token, response)
+        self.assertEqual(ledger.summary(review_id="pr-1")["estimated_total_usd"],
+                         float(price_usd("gpt-6-luna", {
+                             **response["usage"], "web_search_calls": 2})))
+        self.assertGreater(ledger.summary(review_id="pr-1")["estimated_total_usd"], 0.02)
+        # Replayed provider responses do not charge the searches twice.
+        ledger.settle(token, response)
+        self.assertLess(ledger.summary(review_id="pr-1")["estimated_total_usd"], 0.021)
+
     def test_price_uses_request_model_and_long_context_rates(self):
         normal = {"input_tokens": 1_000_000,
                   "input_tokens_details": {"cached_tokens": 100_000,

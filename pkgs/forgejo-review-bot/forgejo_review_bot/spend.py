@@ -12,6 +12,8 @@ from pathlib import Path
 MICRODOLLARS = 1_000_000
 THRESHOLD_TOKENS = 272_000
 FINAL_TOOL_OUTPUT_HEADROOM_TOKENS = 13_000
+WEB_SEARCH_CALL_MICROS = 10_000
+WEB_SEARCH_TOOL_TYPES = {"web_search"}
 RATES = {
     "glm-5.3": (Decimal("1.477"), Decimal("1.477"),
                 Decimal("1.477"), Decimal("4.642")),
@@ -21,6 +23,14 @@ RATES = {
                     Decimal("2.5"), Decimal("10")),
 }
 SNAPSHOT_MODEL = re.compile(r"(gpt-6-luna|gpt-6\.1-sol)-\d{4}-\d{2}-\d{2}")
+
+
+def web_search_calls(response):
+    """Count chargeable searches; opening and finding within pages are free."""
+    return sum(1 for item in response.get("output", [])
+               if isinstance(item, dict) and item.get("type") == "web_search_call"
+               and (item.get("action") or {}).get("type") not in
+               {"open_page", "find_in_page"})
 
 
 class BudgetExceeded(Exception):
@@ -73,12 +83,20 @@ def price_usd(model, usage):
     input_rate, cached_rate, write_rate, output_rate = rates
     if multiplier == 2:
         output_rate *= Decimal("1.5")
+    web_search_calls = usage.get("web_search_calls", 0)
+    try:
+        web_search_calls = int(web_search_calls)
+    except (TypeError, ValueError):
+        return None
+    if web_search_calls < 0:
+        return None
     dollars = (
         Decimal(input_tokens - cached_tokens - cache_write_tokens) * input_rate * multiplier
         + Decimal(cached_tokens) * cached_rate * multiplier
         + Decimal(cache_write_tokens) * write_rate * multiplier
         + Decimal(output_tokens) * output_rate
     ) / Decimal(1_000_000)
+    dollars += Decimal(web_search_calls * WEB_SEARCH_CALL_MICROS) / Decimal(MICRODOLLARS)
     return dollars.quantize(Decimal("0.000001"), rounding=ROUND_CEILING)
 
 
@@ -178,6 +196,16 @@ class Ledger:
             raise ValueError("payload must include max_output_tokens") from None
         if max_output_tokens < 0:
             raise ValueError("max_output_tokens must be nonnegative")
+        search_limit = 0
+        if (request.get("tool_choice") != "none"
+                and any(tool.get("type") in WEB_SEARCH_TOOL_TYPES
+                        for tool in request.get("tools", []))):
+            search_limit = request.get("max_tool_calls")
+            if type(search_limit) is not int or search_limit < 1:
+                raise ValueError("Web search requires a positive max_tool_calls limit")
+            # Search content is billed as input. Reserve the same bounded evidence
+            # headroom used for local tools for each possible hosted search.
+            extra_input_tokens += search_limit * FINAL_TOOL_OUTPUT_HEADROOM_TOKENS
         # Byte length plus padding is a coarse preflight estimate, not a guarantee
         # of the eventual invoice amount.
         input_tokens = (self._payload_bytes(payload) + self.input_padding_tokens
@@ -188,7 +216,9 @@ class Ledger:
         output_rate = rates[3] * (Decimal("1.5") if multiplier == 2 else Decimal(1))
         dollars = (Decimal(input_tokens) * input_rate
                    + Decimal(max_output_tokens) * output_rate) / Decimal(1_000_000)
-        return int((dollars * MICRODOLLARS).to_integral_value(rounding=ROUND_CEILING))
+        web_search_micros = search_limit * WEB_SEARCH_CALL_MICROS
+        return int((dollars * MICRODOLLARS).to_integral_value(
+            rounding=ROUND_CEILING)) + web_search_micros
 
     def reserve(self, stage, model, payload, review_id, reserve_floor_usd=0,
                 reserve_floor_micros=0):
@@ -229,7 +259,8 @@ class Ledger:
     def settle(self, token, response):
         """Settle a reservation from a Responses API result; return whether new."""
         response_id = response.get("id")
-        usage = response.get("usage") or {}
+        usage = {**(response.get("usage") or {}),
+                 "web_search_calls": web_search_calls(response)}
         details = usage.get("input_tokens_details") or {}
         cached_tokens = details.get("cached_tokens", usage.get("cached_tokens", 0))
         cache_write_tokens = details.get("cache_write_tokens",
@@ -244,6 +275,7 @@ class Ledger:
                          and usage.get("output_tokens") is not None
                          and cache_write_tokens is not None),
             "output_tokens": usage.get("output_tokens"),
+            "web_search_calls": usage["web_search_calls"],
         }, sort_keys=True)
         with self._connection() as db:
             db.execute("BEGIN IMMEDIATE")
