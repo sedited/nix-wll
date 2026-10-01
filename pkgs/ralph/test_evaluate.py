@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from ralph import config, evaluate, forgejo, pipeline, spend
+from ralph import config, evaluate, forgejo, pipeline, research, spend
 
 
 class StatsCliTests(unittest.TestCase):
@@ -61,7 +61,19 @@ class EvaluateTests(unittest.TestCase):
         details = {"title": "Pinned input", "body": "Review this.",
                    "base": {"ref": "master"},
                    "head": {"sha": self.git(self.work, "rev-parse", "HEAD")}}
-        with patch.object(forgejo, "forgejo_request", return_value=details) as request:
+        def discussion(_bot_config, path):
+            now = "2026-09-30T00:00:00Z"
+            if path == "/issues/42":
+                return {"number": 42, "title": "Pinned input", "body": "Review this.",
+                        "pull_request": {}, "created_at": now, "updated_at": now}
+            if path in {"/issues/42/comments?limit=10&page=1",
+                        "/pulls/42/reviews?limit=10&page=1"}:
+                return []
+            raise AssertionError(f"unexpected discussion request {path}")
+
+        with patch.object(forgejo, "forgejo_request", return_value=details) as request, \
+                patch.object(forgejo, "public_discussion_request",
+                             side_effect=discussion):
             path = evaluate.capture_case("token", self.checkout, self.root / "cases", 42,
                                          self.bot_config, self.prompt_config)
         request.assert_called_once_with(self.bot_config, "token", "/pulls/42")
@@ -79,6 +91,10 @@ class EvaluateTests(unittest.TestCase):
         self.assertEqual(case["description"], "Review this.")
         self.assertEqual(case["config"]["prompts"]["models"], self.prompt_config.models)
         self.assertEqual(case["config_sha256"], evaluate.digest(case["config"]))
+        self.assertEqual(case["research_evidence_sha256"],
+                         evaluate.digest(case["research_evidence"]))
+        self.assertIn("read_current_pr_discussion",
+                      research.inventory(case["research_evidence"]))
         self.assertEqual(case["source_code_sha256"], evaluate.source_code_sha256())
         self.assertEqual(self.git(self.checkout, "rev-parse", case["head_pin"]),
                          case["head_sha"])
@@ -112,6 +128,9 @@ class EvaluateTests(unittest.TestCase):
             self.assertEqual(snapshot.merge_base, case["merge_base"])
             self.assertEqual(prompt_config.models, self.prompt_config.models)
             self.assertIs(kwargs["allow_discussions"], False)
+            self.assertIn("research_evidence", kwargs)
+            self.assertIn("read_current_pr_discussion",
+                          research.inventory(kwargs["research_evidence"]))
             self.assertEqual(kwargs["routing_mode"], "shadow")
             debug["stage_outputs"] = {"verifier": "raw verifier"}
             seen.append(snapshot)
@@ -158,6 +177,21 @@ class EvaluateTests(unittest.TestCase):
         self.assertIn("Git objects are unavailable", result["error"]["message"])
         self.assertEqual(result["raw_debug"], {})
         self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+
+    def test_capture_rejects_historical_cutoff_without_historical_pr_text(self):
+        details = {"title": "Edited title", "body": "Edited body",
+                   "base": {"ref": "master"},
+                   "head": {"sha": self.git(self.work, "rev-parse", "HEAD")},
+                   "created_at": "2026-09-30T00:00:00Z",
+                   "updated_at": "2026-10-01T00:00:00Z"}
+        with patch.object(forgejo, "forgejo_request", return_value=details), \
+                patch.object(forgejo, "public_discussion_request",
+                             side_effect=AssertionError("discussion used")):
+            with self.assertRaisesRegex(ValueError, "cannot be frozen at cutoff"):
+                evaluate.capture_case(
+                    "token", self.checkout, self.root / "cases", 42,
+                    self.bot_config, self.prompt_config,
+                    research_cutoff="2026-09-30T12:00:00Z")
 
     def test_failed_model_call_keeps_raw_debug(self):
         manifest = self.capture()
@@ -272,6 +306,27 @@ class EvaluateTests(unittest.TestCase):
         self.assertEqual(results[2]["effective_config"]["review_budget_usd"], 0.40)
         self.assertTrue(results[3]["code_changed_since_capture"])
 
+    def test_blind_alternatives_defaults_on_and_can_be_disabled_for_eval(self):
+        manifest = self.capture()
+        seen = []
+
+        def review(api_key, review_input, snapshot, bot_config, prompt_config,
+                   current_pr, debug, **kwargs):
+            seen.append(kwargs.get("blind_alternatives", False))
+            return "Review."
+
+        with patch.object(pipeline, "review_with_independent_passes", side_effect=review):
+            blind = evaluate.run_case(manifest, "key", self.root / "runs", object())
+            regular = evaluate.run_case(manifest, "key", self.root / "runs", object(),
+                                        blind_alternatives=False)
+        results = [json.loads(path.read_text(encoding="utf-8"))
+                   for path in (blind, regular)]
+        self.assertEqual(seen, [True, False])
+        self.assertNotEqual(results[0]["effective_config_sha256"],
+                            results[1]["effective_config_sha256"])
+        self.assertTrue(results[0]["effective_config"]["blind_alternatives"])
+        self.assertFalse(results[1]["effective_config"]["blind_alternatives"])
+
     def test_spend_cli_reads_local_ledger_without_keys(self):
         state = self.root / "state"
         spend.Ledger(state / "spend.sqlite3")
@@ -301,8 +356,15 @@ class EvaluateTests(unittest.TestCase):
                     "status": "verified",
                     "stage": "archaeologist",
                     "summary": "Fix it in the policy layer.",
+                    "candidate": {
+                        "assessment": "risky",
+                        "proposed_review": "stop",
+                        "review_reason": "Wait for design clarity.",
+                    },
                     "verification": {
                         "disposition": "publish",
+                        "proposed_review": "continue",
+                        "review_reason": "Verifier accepted the path.",
                         "reason": "Verified conceptual concern.",
                         "assessment": {
                             "problem": "The PR changes peer eviction policy.",
@@ -434,6 +496,11 @@ class EvaluateTests(unittest.TestCase):
         self.assertEqual(group["published_conceptual_concerns"], 1)
         self.assertEqual(group["conceptual_concern_status_counts"],
                          {"no_concern": 1, "verified": 1})
+        self.assertEqual(group["would_stop"]["candidate"]["counts"], {"stop": 1})
+        self.assertEqual(group["would_stop"]["candidate"]["would_stop_runs"], 1)
+        self.assertEqual(
+            group["would_stop"]["candidate"]["downstream_accepted_findings"], 2)
+        self.assertEqual(group["would_stop"]["verified"]["counts"], {"continue": 1})
         self.assertEqual(group["cost_usd"]["total"], 0.000011)
         self.assertEqual(group["unknown_usage_runs"], 1)
         self.assertEqual(group["unknown_usage_turns"], 1)
@@ -480,7 +547,19 @@ class EvaluateTests(unittest.TestCase):
                    "base": {"ref": "master"},
                    "head": {"sha": self.git(self.work, "rev-parse", "HEAD")}}
         output = io.StringIO()
+        def discussion(_bot_config, path):
+            now = "2026-09-30T00:00:00Z"
+            if path == "/issues/42":
+                return {"number": 42, "title": "Pinned input", "body": "Review this.",
+                        "pull_request": {}, "created_at": now, "updated_at": now}
+            if path in {"/issues/42/comments?limit=10&page=1",
+                        "/pulls/42/reviews?limit=10&page=1"}:
+                return []
+            raise AssertionError(f"unexpected discussion request {path}")
+
         with patch.object(forgejo, "forgejo_request", return_value=details), \
+                patch.object(forgejo, "public_discussion_request",
+                             side_effect=discussion), \
                 contextlib.redirect_stdout(output):
             self.assertEqual(evaluate.main([
                 "capture", "--state-dir", str(self.root / "state"),

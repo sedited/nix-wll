@@ -14,10 +14,10 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import config, forgejo, pipeline, repository, spend, stats, stats_page, trace
+from . import config, forgejo, pipeline, repository, research, spend, stats, stats_page, trace
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def private_dir(path):
@@ -121,15 +121,27 @@ def pull_request_details(bot_config, token, number):
         raise ValueError(f"PR {number} has an invalid API head SHA")
     if not isinstance(title, str) or not isinstance(description, str):
         raise ValueError(f"PR {number} has invalid title or description")
-    return {"base_ref": base_ref, "api_head": api_head,
-            "title": title, "description": description}
+    details = {"base_ref": base_ref, "api_head": api_head,
+               "title": title, "description": description}
+    for key in ("created_at", "updated_at", "closed_at", "merged_at"):
+        if key in pull:
+            details[key] = pull[key]
+    return details
 
 
-def capture_case(forgejo_token, checkout, output_dir, number, bot_config, prompt_config):
+def capture_case(forgejo_token, checkout, output_dir, number, bot_config, prompt_config,
+                 research_requests=None, research_cutoff=None):
     """Make one private manifest with complete local Git objects."""
     output_dir = private_dir(output_dir)
     checkout = checkout.resolve()
+    captured_at = research.utc_now()
+    discussion_cutoff = research_cutoff or captured_at
     details = pull_request_details(bot_config, forgejo_token, number)
+    if research_cutoff is not None and not forgejo._visible_before_cutoff(
+            details, discussion_cutoff):
+        raise ValueError(
+            f"PR {number} text cannot be frozen at cutoff {discussion_cutoff}: "
+            "current metadata is after the cutoff or incomplete")
     expected_head = repository.current_head(bot_config, number)
     if not repository.SHA.fullmatch(expected_head):
         raise ValueError(f"PR {number} has no mirrored pull head")
@@ -154,12 +166,15 @@ def capture_case(forgejo_token, checkout, output_dir, number, bot_config, prompt
         with offline_git():
             verify_local_objects(checkout, base_sha, head_sha)
             snapshot = repository.snapshot_repository(checkout, base_sha, head_sha)
+        research_evidence = research.capture(
+            bot_config, number, research_requests, discussion_cutoff, captured_at)
         frozen_config = {"bot": asdict(bot_config),
                          "prompts": asdict(prompt_config)}
         manifest = {
             "schema_version": SCHEMA_VERSION,
             "case_id": case_id,
-            "captured_at": datetime.now(timezone.utc).isoformat(),
+            "captured_at": captured_at,
+            "discussion_cutoff": research_evidence["cutoff"],
             "pr": number,
             "checkout": str(checkout),
             "base_ref": details["base_ref"],
@@ -176,6 +191,8 @@ def capture_case(forgejo_token, checkout, output_dir, number, bot_config, prompt
             "review_input_sha256": hashlib.sha256(review.encode()).hexdigest(),
             "config": frozen_config,
             "config_sha256": digest(frozen_config),
+            "research_evidence": research_evidence,
+            "research_evidence_sha256": digest(research_evidence),
             "source_code_sha256": source_code_sha256(),
         }
         manifest["manifest_sha256"] = digest(manifest)
@@ -212,7 +229,7 @@ def prompt_override(frozen, prompt_file=None, audit_dir=None, models_json=None):
 
 def run_case(manifest_path, api_key, output_dir, ledger, routing_mode="enabled",
              prompt_file=None, audit_dir=None, models_json=None, labels=None,
-             ppq_api_key=None, ppq_ledger=None):
+             ppq_api_key=None, ppq_ledger=None, blind_alternatives=True):
     """Replay a captured case without Forgejo or remote Git reads."""
     output_dir = private_dir(output_dir)
     debug = {}
@@ -234,6 +251,9 @@ def run_case(manifest_path, api_key, output_dir, ledger, routing_mode="enabled",
         frozen_config = manifest["config"]
         if digest(frozen_config) != manifest["config_sha256"]:
             raise ValueError("Frozen configuration hash mismatch")
+        research_evidence = research.validate(manifest.get("research_evidence"))
+        if digest(research_evidence) != manifest.get("research_evidence_sha256"):
+            raise ValueError("Frozen research evidence hash mismatch")
         bot_config = config.BotConfig(**frozen_config["bot"])
         frozen_prompts = config.PromptConfig(**frozen_config["prompts"])
         prompt_config = prompt_override(frozen_prompts, prompt_file, audit_dir, models_json)
@@ -247,6 +267,8 @@ def run_case(manifest_path, api_key, output_dir, ledger, routing_mode="enabled",
             "ppq_review_budget_usd": None if ppq_limit is None else ppq_limit / 1_000_000,
             "review_budget_usd": None if review_limit is None else review_limit / 1_000_000,
             "monthly_budget_usd": None if monthly_limit is None else monthly_limit / 1_000_000,
+            "research_evidence_sha256": manifest["research_evidence_sha256"],
+            "blind_alternatives": bool(blind_alternatives),
             "source_code_sha256": code_hash,
         }
         config_hash = digest(effective_config)
@@ -254,6 +276,7 @@ def run_case(manifest_path, api_key, output_dir, ledger, routing_mode="enabled",
         artifact["source_code_sha256"] = code_hash
         artifact["capture_code_sha256"] = manifest["source_code_sha256"]
         artifact["code_changed_since_capture"] = code_hash != manifest["source_code_sha256"]
+        artifact["research_evidence_inventory"] = research.inventory(research_evidence)
         checkout = Path(manifest["checkout"])
         base_sha, head_sha = manifest["base_sha"], manifest["head_sha"]
         review = manifest["review_input"]
@@ -270,11 +293,18 @@ def run_case(manifest_path, api_key, output_dir, ledger, routing_mode="enabled",
             ppq_budget = (spend.RequestBudget(ppq_ledger, review_id)
                           if ppq_ledger is not None else None)
             artifact["review_id"] = review_id
+            review_kwargs = {
+                "budget": budget,
+                "routing_mode": routing_mode,
+                "allow_discussions": False,
+                "ppq_api_key": ppq_api_key,
+                "ppq_budget": ppq_budget,
+                "research_evidence": research_evidence,
+                "blind_alternatives": bool(blind_alternatives),
+            }
             content = pipeline.review_with_independent_passes(
                 api_key, review, snapshot, bot_config, prompt_config,
-                manifest["pr"], debug, budget=budget,
-                routing_mode=routing_mode, allow_discussions=False,
-                ppq_api_key=ppq_api_key, ppq_budget=ppq_budget)
+                manifest["pr"], debug, **review_kwargs)
         artifact.update({
             "status": "completed", "case_id": case_id, "pr": manifest["pr"],
             "base_sha": base_sha, "head_sha": head_sha,
@@ -343,6 +373,15 @@ def _rounded(value):
     return None if value is None else round(value, 6)
 
 
+def _research_requests(path):
+    if path is None:
+        return []
+    requests = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(requests, list):
+        raise ValueError("Research requests JSON must contain a list")
+    return requests
+
+
 def _run_has_budget_exhaustion(artifact):
     error = artifact.get("error") or {}
     if error.get("type") == "BudgetExceeded":
@@ -375,6 +414,22 @@ def _new_summary_group():
         "archaeology_research_completed": 0,
         "published_conceptual_concerns": 0,
         "conceptual_concern_status_counts": Counter(),
+        "would_stop": {
+            "candidate": {
+                "counts": Counter(),
+                "would_stop_runs": 0,
+                "downstream_accepted_findings": 0,
+                "downstream_known_cost_usd": 0.0,
+                "downstream_stage_cost_usd": Counter(),
+            },
+            "verified": {
+                "counts": Counter(),
+                "would_stop_runs": 0,
+                "downstream_accepted_findings": 0,
+                "downstream_known_cost_usd": 0.0,
+                "downstream_stage_cost_usd": Counter(),
+            },
+        },
         "known_costs": [],
         "wall_seconds": [],
         "unknown_usage_runs": 0,
@@ -401,6 +456,72 @@ def _new_summary_group():
             "shared_accepted_findings": 0,
         }),
     }
+
+
+def _concept_label(record):
+    if not isinstance(record, dict):
+        return None
+    for key in ("proposed_review", "assessment", "would_stop"):
+        value = record.get(key)
+        if isinstance(value, bool):
+            return "would_stop" if value else "continue"
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _concept_would_stop(label):
+    if not isinstance(label, str):
+        return False
+    normalized = label.lower().replace("-", "_").replace(" ", "_")
+    return normalized in {"stop", "would_stop", "do_not_review",
+                          "skip_review", "withhold", "block"}
+
+
+def _downstream_summary(debug):
+    metrics = trace.stage_metrics(debug)
+    accepted = sum(1 for decision in debug.get("decisions", [])
+                   if isinstance(decision, dict)
+                   and decision.get("disposition") == "publish")
+    known_cost = 0.0
+    stage_costs = Counter()
+    for name, record in metrics.items():
+        if name == "archaeologist":
+            continue
+        cost = record.get("known_estimated_cost_usd", 0.0)
+        known_cost += cost
+        if cost:
+            stage_costs[name] += cost
+    return accepted, known_cost, stage_costs
+
+
+def _add_would_stop_metrics(group, debug):
+    concept = trace.concept_assessment(debug)
+    records = {"candidate": concept.get("candidate") if isinstance(concept, dict) else None}
+    verification = concept.get("verification") if isinstance(concept, dict) else None
+    if isinstance(verification, dict):
+        records["verified"] = verification.get("assessment")
+        if isinstance(records["verified"], dict):
+            records["verified"] = {
+                **records["verified"],
+                **{key: verification[key]
+                   for key in ("proposed_review", "review_reason")
+                   if key in verification},
+            }
+        else:
+            records["verified"] = verification
+    accepted, known_cost, stage_costs = _downstream_summary(debug)
+    for stage, record in records.items():
+        label = _concept_label(record)
+        if label is None:
+            continue
+        bucket = group["would_stop"][stage]
+        bucket["counts"][label] += 1
+        if _concept_would_stop(label):
+            bucket["would_stop_runs"] += 1
+            bucket["downstream_accepted_findings"] += accepted
+            bucket["downstream_known_cost_usd"] += known_cost
+            bucket["downstream_stage_cost_usd"].update(stage_costs)
 
 
 def _add_stage_metrics(group, debug):
@@ -468,6 +589,18 @@ def _finalize_group(group):
             "sole_accepted_findings": metrics["sole_accepted_findings"],
             "shared_accepted_findings": metrics["shared_accepted_findings"],
         }
+    would_stop = {}
+    for name, record in group["would_stop"].items():
+        would_stop[name] = {
+            "counts": dict(sorted(record["counts"].items())),
+            "would_stop_runs": record["would_stop_runs"],
+            "downstream_accepted_findings": record["downstream_accepted_findings"],
+            "downstream_known_cost_usd": _rounded(record["downstream_known_cost_usd"]),
+            "downstream_stage_cost_usd": {
+                stage: _rounded(cost)
+                for stage, cost in sorted(record["downstream_stage_cost_usd"].items())
+            },
+        }
     return {
         "runs": runs,
         "completed": completed,
@@ -490,6 +623,7 @@ def _finalize_group(group):
         "published_conceptual_concerns": group["published_conceptual_concerns"],
         "conceptual_concern_status_counts": dict(sorted(
             group["conceptual_concern_status_counts"].items())),
+        "would_stop": would_stop,
         "cost_usd": {
             **_series(group["known_costs"]),
             "known_per_accepted_finding": _rounded(
@@ -540,7 +674,7 @@ def summarize_runs(paths):
         group["accepted_findings"] += sum(
             decision.get("disposition") == "publish" for decision in decisions)
         assessment = trace.concept_assessment(debug)
-        if trace.published_concept_assessment(debug) is not None:
+        if trace.published_concept_concern(debug):
             group["published_conceptual_concerns"] += 1
         if assessment:
             group["conceptual_concern_status_counts"][assessment.get("status", "unknown")] += 1
@@ -550,6 +684,7 @@ def summarize_runs(paths):
                for name, stage in (debug.get("stages") or {}).items()):
             group["archaeology_research_completed"] += 1
         _add_stage_metrics(group, debug)
+        _add_would_stop_metrics(group, debug)
     return {
         "schema_version": 1,
         "run_artifacts": artifacts,
@@ -583,6 +718,10 @@ def main(argv=None):
     capture.add_argument("--prompt-file", type=Path, default=config.DEFAULT_PROMPT_FILE)
     capture.add_argument("--audit-prompt-dir", type=Path, default=config.DEFAULT_AUDIT_DIR)
     capture.add_argument("--models-json", type=Path)
+    capture.add_argument("--research-cutoff",
+                         help="ISO timestamp cutoff for captured discussion evidence")
+    capture.add_argument("--research-requests-json", type=Path,
+                         help="Optional list of extra frozen discussion tool calls")
     capture.add_argument("prs", type=int, nargs="+")
 
     run = commands.add_parser("run", help="replay frozen cases without Forgejo")
@@ -595,6 +734,9 @@ def main(argv=None):
     run.add_argument("--models-json", type=Path)
     run.add_argument("--routing-mode", choices=("enabled", "shadow", "full"),
                      default="enabled")
+    run.add_argument("--blind-alternatives", action=argparse.BooleanOptionalAction,
+                     default=True,
+                     help="Run the eval-only blind alternatives experiment")
     run.add_argument("--review-budget-usd", type=float, default=1.00)
     run.add_argument("--ppq-review-budget-usd", type=float, default=0.50)
     run.add_argument("--monthly-budget-usd", type=float)
@@ -621,10 +763,12 @@ def main(argv=None):
         prompt_config = config.PromptConfig.load(args.prompt_file, args.audit_prompt_dir,
                                                  args.models_json)
         token = read_secret(args.forgejo_token_file, "Forgejo token")
+        requests = _research_requests(args.research_requests_json)
         checkout = args.state_dir / "evaluation-checkout"
         for number in args.prs:
             print(capture_case(token, checkout, args.output_dir, number,
-                               bot_config, prompt_config))
+                               bot_config, prompt_config, requests,
+                               args.research_cutoff))
         return 0
     if args.command == "spend":
         path = args.state_dir / "spend.sqlite3"
@@ -655,7 +799,8 @@ def main(argv=None):
         path = run_case(manifest, api_key, args.output_dir, ledger,
                         args.routing_mode, args.prompt_file, args.audit_prompt_dir,
                         args.models_json, labels, ppq_api_key=ppq_api_key,
-                        ppq_ledger=ppq_ledger)
+                        ppq_ledger=ppq_ledger,
+                        blind_alternatives=args.blind_alternatives)
         print(path)
         if json.loads(path.read_text(encoding="utf-8"))["status"] != "completed":
             result = 1
