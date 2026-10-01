@@ -24,7 +24,7 @@ stable named flake output.
 | Output | Purpose |
 | --- | --- |
 | `packages.<system>.dnsseedrs` | Bitcoin DNS seeder built from `willcl-ark/dnsseedrs`. |
-| `packages.<system>.forgejo-review-bot` | Forgejo review bot with budgeted audit routing and frozen evaluation CLI. |
+| `packages.<system>.forgejo-review-bot` | Forgejo review bot with budgeted audit routing and frozen evaluation CLI. [Structure and review flow](pkgs/forgejo-review-bot/README.md). |
 
 ## Usage
 
