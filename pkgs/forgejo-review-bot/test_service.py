@@ -11,6 +11,7 @@ import urllib.request
 from http.server import ThreadingHTTPServer
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -161,6 +162,49 @@ class ServiceTests(unittest.TestCase):
             self.assertEqual(self.process(retry_job), "unchanged")
             self.assertEqual(publish.call_count, 1)
         self.assertIsNone(restarted.claim())
+
+    def test_report_exists_before_publication_and_retry_reuses_url(self):
+        self.bot_config = replace(self.bot_config,
+                                  report_dir=self.state_dir / "public",
+                                  report_base_url="https://review.example.org/traces")
+        job = self.enqueue()
+        # A durable result is enough to retry publication without another model call.
+        job["review_result"] = {
+            "base_sha": "b" * 40, "head_sha": "a" * 40,
+            "content": "Review content", "debug": {}}
+        self.jobs.save_result(job, job["review_result"])
+        urls = []
+
+        def publish(*args):
+            debug = args[-1]
+            urls.append(debug["report_url"])
+            filename = urls[-1].rsplit("/", 1)[-1]
+            self.assertTrue((self.bot_config.report_dir / filename).is_file())
+            if len(urls) == 1:
+                raise urllib.error.URLError("connection lost")
+            return "published"
+
+        with (patch.object(service.repository, "current_head", return_value="a" * 40),
+              patch.object(service.forgejo, "publish_review", side_effect=publish)):
+            with self.assertLogs(level="ERROR"):
+                self.assertEqual(self.process(job), "retry")
+            retry_job = self.jobs.claim()
+            self.assertEqual(self.process(retry_job), "published")
+        self.assertEqual(urls[0], urls[1])
+
+    def test_report_failure_publishes_review_without_broken_link(self):
+        self.bot_config = replace(self.bot_config,
+                                  report_dir=self.state_dir / "public",
+                                  report_base_url="https://review.example.org/traces")
+        job = self.enqueue()
+        job["review_result"] = {"base_sha": "b" * 40, "head_sha": "a" * 40,
+                                "content": "Review content", "debug": {}}
+        with (patch.object(service.repository, "current_head", return_value="a" * 40),
+              patch.object(service.report, "save_report", side_effect=OSError("disk full")),
+              patch.object(service.forgejo, "publish_review", return_value="published") as publish):
+            with self.assertLogs(level="WARNING"):
+                self.assertEqual(self.process(job), "published")
+        self.assertNotIn("report_url", publish.call_args.args[-1])
 
     def test_stale_review_keeps_newer_pending_head(self):
         old = self.enqueue()

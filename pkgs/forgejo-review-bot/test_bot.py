@@ -6,6 +6,7 @@ import unittest
 import urllib.error
 import urllib.request
 from pathlib import Path
+from dataclasses import replace
 from unittest.mock import patch
 
 
@@ -31,6 +32,22 @@ class BotTests(unittest.TestCase):
         self.assertEqual(self.bot_config.repository_url, "https://git.fish.foo/bitcoin/bitcoin")
         self.assertEqual(self.bot_config.comment_marker,
                          "<!-- forgejo-review-bot:bitcoin/bitcoin -->")
+
+    def test_report_configuration_requires_a_directory_and_public_url(self):
+        with self.assertRaisesRegex(ValueError, "set together"):
+            replace(self.bot_config, report_dir=Path("/public"))
+        for url in ("javascript:alert(1)", "https://user:secret@example.org",
+                    "https://example.org/?secret=foo", "https://example.org/#fragment"):
+            with self.subTest(url=url), self.assertRaises(ValueError):
+                replace(self.bot_config, report_dir=Path("/public"), report_base_url=url)
+
+    def test_review_comment_links_to_full_report_and_keeps_commit_header(self):
+        url = "https://review.example.org/traces/42-run.html"
+        body = forgejo.review_body(self.bot_config, self.prompt_config,
+                                   "b" * 40, "a" * 40, "Review text.",
+                                   {"report_url": url})
+        self.assertIn(f"[Full review report](<{url}>)", body)
+        self.assertIn(f"Head: `{'a' * 40}`", body.splitlines()[:5])
 
     def test_config_requires_repository_url_when_api_url_is_not_deriveable(self):
         with self.assertRaisesRegex(ValueError, "repository_url"):

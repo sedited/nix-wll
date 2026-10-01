@@ -140,9 +140,12 @@ def find_comment(bot_config, token, number, bot_login):
 def review_body(bot_config, prompt_config, base_sha, head_sha, content, debug=None):
     from .trace import debug_section
 
+    report_link = (f"\n[Full review report](<{debug['report_url']}>)\n"
+                   if debug is not None and debug.get("report_url") else "")
     return (f"{bot_config.comment_marker}\n"
             f"Base: `{base_sha}`  \nHead: `{head_sha}`\n\n"
             f"{content.strip()}\n"
+            f"{report_link}"
             f"{debug_section(debug, prompt_config) if debug is not None else ''}")
 
 def comment_matches_head(comment, head_sha):

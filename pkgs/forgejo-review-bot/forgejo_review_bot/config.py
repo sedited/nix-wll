@@ -3,6 +3,7 @@
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from .spend import supports_model
 
@@ -40,6 +41,8 @@ class BotConfig:
     forgejo_api: str
     repository_url: str | None = None
     comment_marker: str | None = None
+    report_dir: Path | None = None
+    report_base_url: str | None = None
 
     def __post_init__(self):
         if not self.origin or not self.repository or not self.forgejo_api:
@@ -51,6 +54,15 @@ class BotConfig:
         object.__setattr__(self, "repository_url", url)
         object.__setattr__(self, "comment_marker",
                            self.comment_marker or default_comment_marker(self.repository))
+        if (self.report_dir is None) != (self.report_base_url is None):
+            raise ValueError("report_dir and report_base_url must be set together")
+        if self.report_base_url is not None:
+            report_url = urlsplit(self.report_base_url)
+            if (report_url.scheme not in {"http", "https"} or not report_url.netloc
+                    or report_url.username or report_url.password
+                    or report_url.query or report_url.fragment):
+                raise ValueError("report_base_url must be an HTTP URL without credentials, query or fragment")
+            object.__setattr__(self, "report_base_url", self.report_base_url.rstrip("/"))
 
 
 def validate_models(models):

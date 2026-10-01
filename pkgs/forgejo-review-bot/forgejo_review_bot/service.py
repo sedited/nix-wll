@@ -14,7 +14,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import config, forgejo, model, pipeline, repository, spend, trace
+from . import config, forgejo, model, pipeline, report, repository, spend, trace
 from .jobs import JobStore
 from .repository import BRANCH, SHA
 
@@ -173,6 +173,18 @@ def process_job(job, jobs, state_dir, api_key, forgejo_token, bot_login,
                 debug = saved["debug"]
             if not is_current():
                 raise model.StaleReview("PR head changed before publication")
+            if bot_config.report_dir is not None:
+                stage = "report"
+                report_id = f'{number}-{head_sha}-{job["id"]}-{job["generation"]}'
+                try:
+                    filename = report.save_report(
+                        bot_config.report_dir, number, head_sha, content, debug,
+                        prompt_config, report_id)
+                    debug["report_url"] = f"{bot_config.report_base_url}/{filename}"
+                except OSError as exc:
+                    debug.pop("report_url", None)
+                    logging.warning("Could not save public review report for PR %d: %s",
+                                    number, type(exc).__name__)
             stage = "publish"
             result = forgejo.publish_review(bot_config, prompt_config, forgejo_token,
                                             number, bot_login, base_sha, head_sha,
@@ -330,6 +342,10 @@ def main():
     parser.add_argument("--workers", type=int, default=3,
                         help="Maximum concurrent pull request reviews")
     parser.add_argument("--state-dir", type=Path, required=True)
+    parser.add_argument("--report-dir", type=Path,
+                        help="Public directory for static HTML and JSON review reports")
+    parser.add_argument("--report-base-url",
+                        help="Public HTTP URL serving the report directory")
     parser.add_argument("--origin", required=True,
                         help="Git remote URL used to fetch the base branch and PR heads")
     parser.add_argument("--repository", required=True,
@@ -361,7 +377,8 @@ def main():
         parser.error("workers must be positive")
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     bot_config = config.BotConfig(args.origin, args.repository, args.forgejo_api,
-                                  args.repository_url, args.comment_marker)
+                                  args.repository_url, args.comment_marker,
+                                  args.report_dir, args.report_base_url)
     prompt_config = config.PromptConfig.load(args.prompt_file, args.audit_prompt_dir,
                                              args.models_json)
     api_key = args.openai_key_file.read_text().strip()

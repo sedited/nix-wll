@@ -129,6 +129,21 @@ responses during development, including findings the verifier rejected. The
 main comment contains verified findings. Private traces preserve full responses
 and per-request usage, including failures.
 
+For full browser reports, set `services.forgejoReviewBot.reportDir` to a
+separate public directory and `services.forgejoReviewBot.reportBaseUrl` to
+the HTTP URL serving it. The module creates the directory with mode `0755`;
+the bot writes readable static HTML and JSON files before publishing a link
+in the review comment. Configure your web server to serve this directory
+without directory browsing. Do not serve the private `stateDir` or its
+`review-traces` directory.
+
+Reports include full preliminary agent replies, coverage limitations, and
+review details. Preliminary candidates remain unverified; the main review
+contains verified findings. Public reports exclude private request payloads
+and configuration. Each review run has a distinct URL, and publication retries
+reuse it. If a report cannot be written, the review is published without a
+report link. Existing comments and private traces are not backfilled.
+
 To force a fresh review of the same head, send a signed synthetic pull request
 webhook with `"review_bot_force": true`. Normal Forgejo webhooks omit this field.
 A forced review receives a new allowance. Changing prompts does not

@@ -56,6 +56,12 @@ let
     "--models-json"
     cfg.modelsJson
   ]
+  ++ lib.optionals (cfg.reportDir != null && cfg.reportBaseUrl != null) [
+    "--report-dir"
+    cfg.reportDir
+    "--report-base-url"
+    cfg.reportBaseUrl
+  ]
   ++ lib.optionals (cfg.monthlyBudgetUsd != null) [
     "--monthly-budget-usd"
     (toString cfg.monthlyBudgetUsd)
@@ -184,6 +190,18 @@ in
       description = "Private directory containing Git objects, durable jobs, review traces and the spend ledger.";
     };
 
+    reportDir = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = "Public directory for full HTML and JSON review reports. Serve it with a web server; keep it separate from stateDir.";
+    };
+
+    reportBaseUrl = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = "Public HTTP URL serving reportDir. Enables full report links in review comments.";
+    };
+
     openaiKeyFile = lib.mkOption {
       type = lib.types.str;
       description = "Path to a file containing the OpenAI API key.";
@@ -229,7 +247,33 @@ in
         assertion = lib.hasPrefix "/var/lib/" cfg.stateDir;
         message = "services.forgejoReviewBot.stateDir must be under /var/lib so systemd can manage it with StateDirectory.";
       }
+      {
+        assertion = (cfg.reportDir == null) == (cfg.reportBaseUrl == null);
+        message = "services.forgejoReviewBot.reportDir and reportBaseUrl must be set together.";
+      }
+      {
+        assertion =
+          cfg.reportDir == null
+          || (
+            lib.hasPrefix "/" cfg.reportDir
+            && (
+              let
+                reportDir = toString (builtins.toPath cfg.reportDir);
+                stateDir = toString (builtins.toPath cfg.stateDir);
+              in
+              reportDir != "/"
+              && reportDir != stateDir
+              && !(lib.hasPrefix "${stateDir}/" reportDir)
+              && !(lib.hasPrefix "${reportDir}/" stateDir)
+            )
+          );
+        message = "services.forgejoReviewBot.reportDir must be absolute and separate from the private stateDir.";
+      }
     ];
+
+    systemd.tmpfiles.rules = lib.optional (
+      cfg.reportDir != null
+    ) "d ${cfg.reportDir} 0755 ${cfg.user} ${cfg.group} -";
 
     users.users.${cfg.user} = {
       isSystemUser = true;
@@ -258,7 +302,7 @@ in
         NoNewPrivileges = true;
         ProtectSystem = "strict";
         ProtectHome = true;
-        ReadWritePaths = [ cfg.stateDir ];
+        ReadWritePaths = [ cfg.stateDir ] ++ lib.optional (cfg.reportDir != null) cfg.reportDir;
         PrivateTmp = true;
         PrivateDevices = true;
         ProtectKernelTunables = true;
