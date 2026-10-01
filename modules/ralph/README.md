@@ -69,13 +69,15 @@ findings or assign severity. Its `assessment` is one of `worth_pursuing`,
 `proposed_review` is `continue`, `would_stop` or `undetermined`, with a
 `review_reason`. Negative, failed or incomplete archaeology never skips any
 selected code stage. The verifier checks decisive claims and technical
-assumptions before publishing a short "Concept and approach" assessment,
-including when no code findings survive. It also records its own final review
-recommendation. At least initially, normal Ralph comments include supported
-positive or negative concept assessments, meaningful alternatives and remaining
-uncertainty. The public comment stays concise; the detailed brief and fuller
-alternatives discussion appear in the full report. Unsupported assessments are
-withheld; editor failure retains the verified wording.
+assumptions before publishing supported, actionable objections to the PR's
+premise or approach, including when no code findings survive. It also records
+its own final review recommendation. The public "Concept and approach" section
+is a short paragraph and may include at most one alternative demonstrated to be
+better under the PR's actual requirements, accounting for its costs. It omits
+concerns already covered by design findings. Favorable assessments and rejected
+or inconclusive alternatives stay in the detailed trace; comments have no
+separate alternatives list. Unsupported assessments are withheld; editor
+failure retains the verified wording.
 
 After a valid concept candidate, blind alternatives are enabled by default. This
 uses the existing archaeologist model with base-only code tools and neutral

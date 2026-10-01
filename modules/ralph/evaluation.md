@@ -66,7 +66,11 @@ behavior, reachable precondition, broken invariant, and consequence well enough
 for a maintainer to act. For clean cases, count unsupported defect claims as
 false positives. A proposed stop is false when the PR still deserved code review
 or later stages found useful code findings. Keep design feedback and concept
-assessment quality separate from correctness recall.
+assessment quality separate from correctness recall. Public concept feedback
+should contain only supported, actionable objections and at most one alternative
+shown to be better under the PR's requirements and costs. Check for duplicated
+design findings and unnecessary prose. Score favorable assessments and rejected
+or inconclusive alternatives from the detailed trace, where they are retained.
 
 ## Comparisons
 

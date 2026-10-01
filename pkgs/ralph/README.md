@@ -269,17 +269,21 @@ uses the existing archaeologist model with base-only code tools and neutral
 problem, goal and baseline inputs. Its result goes to the verifier, not to
 discovery. The pipeline still runs every selected code stage.
 
-The verifier checks the premises before accepting a separate conceptual
-assessment. It records both the archaeologist's proposed review recommendation
-and its own final recommendation. This assessment has no finding ID, severity or
-artificial source location. The collator can edit it even when there are no
-accepted code findings. The existing collator remains the only writing pass. At
-least initially, the public review includes a concise "Concept and approach"
-section for supported positive or negative assessments, with meaningful
-alternatives and remaining uncertainty. A question belongs here only if its
-answer settles a specific material concern. The full research brief and fuller
-alternatives detail remain in the report. Invalid or unverified assessments are
-withheld. Failed editing falls back to verified wording.
+The verifier checks the premises before accepting public conceptual feedback.
+It records both the archaeologist's proposed review recommendation and its own
+final recommendation. Public feedback must identify a supported, actionable
+objection to the PR's premise or approach. It may include at most one alternative
+that demonstrably improves on the proposal under its actual requirements, with
+the alternative's costs considered. Favorable assessments and rejected or
+inconclusive alternatives stay in the detailed trace.
+
+Conceptual feedback has no finding ID, severity or artificial source location.
+The collator can edit it even when there are no accepted code findings, and
+remains the only writing pass. The public "Concept and approach" section is a
+short paragraph, without a separate alternatives list. It omits objections
+already covered by accepted design findings. A question belongs here only if
+its answer settles a specific material concern. Invalid or unverified
+assessments are withheld. Failed editing falls back to verified wording.
 
 Reports and statistics count published concept assessments separately from
 findings and distinguish them from completed research. They also expose

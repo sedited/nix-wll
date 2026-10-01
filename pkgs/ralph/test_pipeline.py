@@ -557,6 +557,34 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(self.debug["concept_assessment"]["status"], "no_concern")
         self.assertEqual(self.debug["finding_attribution"], [])
 
+    def test_favorable_concept_and_rejected_alternatives_preserve_public_code_finding(self):
+        self.tier, self.audits = "routine", []
+
+        def review(*args, **kwargs):
+            stage = kwargs["stage_name"]
+            if stage == "alternatives":
+                return json.dumps({"coverage": COMPLETE,
+                                   "alternatives": assessment()["alternatives"]})
+            if stage == "independent":
+                return discovery([candidate()])
+            if stage == "verifier":
+                payload = json.loads(args[1].split("Verification input:\n")[1])
+                self.assertEqual(payload["concept_candidate"]["assessment"], "worth_pursuing")
+                self.assertEqual(len(payload["blind_alternatives"]), 1)
+                return verification([
+                    {"candidate_ids": ["independent:1"], "disposition": "publish",
+                     "reason": "Useful simplification", "finding": self.published}])
+            return discovery()
+
+        content = self.run_review(review, blind_alternatives=True)
+
+        self.assertIn(self.published["body"], content)
+        self.assertNotIn("Concept and approach", content)
+        self.assertNotIn("Alternatives considered", content)
+        self.assertNotIn("Do nothing", content)
+        self.assertEqual(self.debug["concept_assessment"]["status"], "no_concern")
+        self.assertEqual(self.debug["stages"]["alternatives"]["status"], "completed")
+
     def test_verified_material_concept_concern_gets_public_paragraph(self):
         self.tier, self.audits = "routine", []
         concern = {**assessment(),
@@ -582,6 +610,8 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("Concept and approach", content)
         self.assertIn("process cost", content)
         self.assertIn("https://example.invalid/o/r/pulls/42", content)
+        self.assertNotIn("Alternatives considered", content)
+        self.assertNotIn("**Do nothing**", content)
         self.assertEqual(self.debug["concept_assessment"]["status"], "verified")
 
     def test_discussion_disabled_review_runs_archaeology_without_history_tools(self):

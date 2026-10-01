@@ -269,6 +269,10 @@ def verification(text, candidates, snapshot, concept_assessment=None):
             if concept_assessment is None:
                 raise InvalidReview("Concept assessment had no archaeology candidate")
             _concept_assessment(concept["assessment"])
+            if concept["assessment"]["assessment"] == "worth_pursuing":
+                raise InvalidReview("Favorable concept assessments are not public feedback")
+            if len(concept["assessment"]["alternatives"]) > 1:
+                raise InvalidReview("Public concept feedback may include at most one alternative")
         elif concept["assessment"] is not None:
             raise InvalidReview("Only publish may include a concept assessment")
         _review_proposal(concept["proposed_review"], concept["review_reason"],
@@ -362,18 +366,10 @@ def collation(text, accepted, concept_assessment=None):
     return edited, concept_summary
 
 
-def render(findings, limitations=(), concept_summary=None, concept_alternatives=()):
+def render(findings, limitations=(), concept_summary=None):
     sections = []
     if concept_summary:
         sections.append(f"##### Concept and approach\n\n{concept_summary}")
-        if concept_alternatives:
-            alternatives = []
-            for alternative in concept_alternatives:
-                alternatives.append(
-                    f"- **{alternative['name']}**: {alternative['concept']} "
-                    f"Benefit: {alternative['benefit']} Cost: {alternative['cost']} "
-                    f"Uncertainty: {alternative['unresolved']}")
-            sections.append("Alternatives considered:\n\n" + "\n".join(alternatives))
     groups = {}
     for finding in findings:
         section = "design" if finding["kind"] == "design" else finding["severity"]

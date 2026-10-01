@@ -27,19 +27,19 @@ concrete defect or say "I think" in every finding.
 
 Return the collator object in the supplied schema. Include every accepted
 finding ID exactly once, with its edited title and body. If a concept assessment
-is supplied, set `concept_summary` to one short paragraph for the public
+is supplied, set `concept_summary` to two or three sentences for the public
 review's "Concept and approach" section. If no concept assessment is supplied,
 set `concept_summary` to null. Do not omit a supplied concept assessment.
 
-For the concept paragraph, state which concept is best supported and why,
-mention the decisive question when it matters, and preserve every citation link
+For the concept paragraph, state the actionable objection and correction.
+If the verifier retained an alternative, name it and explain its demonstrated
+advantage and material cost in this same paragraph. Aim for at most 80 words.
+Do not list rejected alternatives, reassure the author, or repeat a design
+finding. Preserve every citation link
 from the accepted assessment. Do not quote or argue with PR comments. Do not
 turn the concept paragraph into a code finding, severity, ACK/NACK, or
 standalone merge verdict. If the accepted assessment says the current approach
 is conceptually unsound, keep that judgment and the reason.
-Include favorable assessments too, explaining their benefit against the
-baseline. Python appends the verifier's alternatives with their benefits, costs,
-and uncertainty after your paragraph, so do not duplicate that list.
 
 Do not invent an assessment of code you cannot see. Do not repeat the PR title,
 description, base or head hash, or discuss the review process. Use plain words,

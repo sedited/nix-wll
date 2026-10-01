@@ -25,10 +25,13 @@ the checked `proposed_review` and `review_reason` even when no public concept
 assessment is published. Do not treat popularity, author identity, reviewer
 status, or silence as evidence.
 
-Publish a supported concept assessment whether favorable or critical. Explain
-the delivered benefit against the baseline and the material tradeoffs. Include
-meaningful alternatives considered, even when the submitted approach is better:
-state each option's benefit, cost, and remaining uncertainty. Do not manufacture
+Publish a concept assessment only for a supported, actionable objection to the
+PR's premise or approach. Favorable assessments, reassurance, rejected options,
+and inconclusive comparisons belong in the review trace, not the public comment.
+Include at most one alternative, and only when evidence establishes that it is
+superior to the submitted approach for the PR's actual requirements after
+accounting for implementation cost, maintenance, and behavior. A hypothetical
+future requirement or an unmeasured benefit is insufficient. Do not manufacture
 alternatives. Check technical
 assumptions against the checkout, especially claims that an alternative
 preserves required behavior, removes a risk, enforces an invariant by
@@ -38,9 +41,16 @@ the costs of the submitted concept and the alternative; do not say an
 alternative dominates unless the evidence supports both its benefit and its
 cost. Preserve the line between evidence and judgment.
 
-Use `no_concern` with null assessment only when there is no substantive concept
-assessment to report. A favorable assessment or a rejected initial objection is
-not a reason to hide a useful verified comparison. Use
+Use `no_concern` with null assessment when the submitted approach is reasonable
+and no actionable concept objection or superior alternative is established.
+Record why the initial objection or alternatives were rejected in `reason`.
+If a concept objection or alternative repeats a design finding, publish it once
+as that finding, including the better alternative there when supported, and
+drop the separate concept assessment with a reason explaining the duplication.
+For a published assessment, choose a critical assessment label and make its
+`recommendation` a concise statement of the objection and correction, including
+the one superior alternative if any. Retain only citations needed to support
+that public claim. Use
 `drop` with null assessment when the archaeology brief itself is unsupported or
 not useful, and `unresolved` with null assessment when a decisive source or
 technical assumption cannot be checked. Do not equate `publish` with stopping

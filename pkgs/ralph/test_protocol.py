@@ -215,6 +215,47 @@ class ProtocolTests(unittest.TestCase):
 
         self.assertEqual(result["assessment"]["alternatives"], [])
 
+    def test_favorable_concept_is_valid_research_but_cannot_be_published(self):
+        assessment = {**self.concept_assessment(), "assessment": "worth_pursuing",
+                      "proposed_review": "continue"}
+        research = protocol.archaeology(json.dumps({
+            "coverage": self.coverage, "assessment": assessment,
+        }))
+        self.assertEqual(research["assessment"], assessment)
+        decision = {"candidate_ids": ["tests:1"], "disposition": "publish",
+                    "reason": "Verified", "finding": self.finding}
+        concept = {"disposition": "publish", "reason": "The approach is sound.",
+                   "assessment": assessment, "proposed_review": "continue",
+                   "review_reason": "Continue the implementation review."}
+
+        result, accepted = protocol.verification(
+            self.verification([decision], concept=concept), [{"id": "tests:1"}],
+            self.snapshot, concept_assessment=assessment)
+
+        self.assertEqual(accepted, [{**self.finding, "id": "finding:1"}])
+        self.assertEqual(result["concept"]["disposition"], "unresolved")
+        self.assertIsNone(result["concept"]["assessment"])
+        self.assertIsNotNone(result["concept_validation_error"])
+
+    def test_publishing_multiple_alternatives_preserves_verified_code_finding(self):
+        assessment = self.concept_assessment()
+        assessment["alternatives"].append({**assessment["alternatives"][0],
+                                           "name": "Reuse an existing interface"})
+        decision = {"candidate_ids": ["tests:1"], "disposition": "publish",
+                    "reason": "Verified", "finding": self.finding}
+        concept = {"disposition": "publish", "reason": "The approach needs revision.",
+                   "assessment": assessment, "proposed_review": "would_stop",
+                   "review_reason": "The alternatives reduce the layering cost."}
+
+        result, accepted = protocol.verification(
+            self.verification([decision], concept=concept), [{"id": "tests:1"}],
+            self.snapshot, concept_assessment=assessment)
+
+        self.assertEqual(accepted, [{**self.finding, "id": "finding:1"}])
+        self.assertEqual(result["concept"]["disposition"], "unresolved")
+        self.assertIsNone(result["concept"]["assessment"])
+        self.assertIsNotNone(result["concept_validation_error"])
+
     def test_nonpublish_concept_preserves_verified_review_proposal(self):
         concept = {"disposition": "no_concern",
                    "reason": "The concern is not established.",

@@ -420,5 +420,4 @@ def review_with_independent_passes(api_key, review, snapshot, bot_config,
     if ppq_budget is not None:
         debug["ppq_budget"] = ppq_budget.summary()
     debug.pop("pipeline_stage", None)
-    return protocol.render(findings, limitations, concept_summary,
-                           verified_concept["alternatives"] if verified_concept else ())
+    return protocol.render(findings, limitations, concept_summary)
