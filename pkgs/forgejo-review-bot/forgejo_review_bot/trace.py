@@ -1,5 +1,4 @@
-"""Review usage, public debug rendering, and private trace storage."""
-import html
+"""Review usage and private trace storage."""
 import json
 import os
 import time
@@ -208,49 +207,6 @@ def review_trace(debug, prompt_config):
                              "counts use the conservative cache-write rate.")
     return trace
 
-
-def _html_cell(value):
-    if value is None:
-        return ""
-    if isinstance(value, list):
-        value = ", ".join(str(item) for item in value)
-    return html.escape(str(value))
-
-
-def _attribution_table(attribution):
-    if not attribution:
-        return ""
-    rows = []
-    for finding in attribution:
-        location = ""
-        if finding.get("path") and finding.get("line") and finding.get("side"):
-            location = f"{finding['path']}:{finding['line']} ({finding['side']})"
-        rows.append(
-            "<tr>"
-            f"<td>{_html_cell(finding.get('finding_id'))}</td>"
-            f"<td>{_html_cell(finding.get('title'))}</td>"
-            f"<td>{_html_cell(location)}</td>"
-            f"<td>{_html_cell(finding.get('raised_by'))}</td>"
-            f"<td>{_html_cell(finding.get('raised_by_models'))}</td>"
-            f"<td>{_html_cell(finding.get('verified_by'))}</td>"
-            f"<td>{_html_cell(finding.get('edited_by'))}</td>"
-            f"<td>{_html_cell(finding.get('candidate_ids'))}</td>"
-            "</tr>")
-    return (
-        "<table>\n"
-        "<thead><tr><th>ID</th><th>Finding</th><th>Location</th>"
-        "<th>Raised by</th><th>Models</th><th>Verified by</th><th>Edited by</th>"
-        "<th>Candidates</th></tr></thead>\n"
-        f"<tbody>{''.join(rows)}</tbody>\n"
-        "</table>\n\n")
-
-
-def debug_section(debug, prompt_config):
-    trace = review_trace(debug, prompt_config)
-    table = _attribution_table(trace.get("finding_attribution", []))
-    rendered = html.escape(json.dumps(trace, indent=2, ensure_ascii=True))
-    return (f"\n<details><summary>Review debug</summary>\n\n"
-            f"{table}<pre>{rendered}</pre>\n</details>\n")
 
 def save_review_trace(state_dir, number, head_sha, content, debug, prompt_config):
     trace_dir = state_dir / "review-traces"

@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from forgejo_review_bot import trace
+from forgejo_review_bot import report, trace
 
 
 class TraceAttributionTests(unittest.TestCase):
@@ -108,11 +108,14 @@ class TraceAttributionTests(unittest.TestCase):
             "stages": {},
         }
 
-        rendered = trace.debug_section(debug, self.prompt_config)
+        with tempfile.TemporaryDirectory() as directory:
+            filename = report.save_report(Path(directory), 42, "a" * 40,
+                                          "Review.", debug, self.prompt_config, "42-run")
+            rendered = (Path(directory) / filename).read_text()
         public = trace.review_trace(debug, self.prompt_config)
 
         self.assertIsNone(public["finding_attribution"][0]["edited_by"])
-        self.assertIn("<td></td><td>independent:1</td>", rendered)
+        self.assertIn("<td>independent:1</td><td>verifier</td><td></td>", rendered)
 
     def test_invalid_withheld_finding_has_no_attribution_but_keeps_decision_counts(self):
         debug = {
@@ -190,9 +193,12 @@ class TraceAttributionTests(unittest.TestCase):
             "stages": {},
         }
 
-        rendered = trace.debug_section(debug, self.prompt_config)
+        with tempfile.TemporaryDirectory() as directory:
+            filename = report.save_report(Path(directory), 42, "a" * 40,
+                                          "Review.", debug, self.prompt_config, "42-run")
+            rendered = (Path(directory) / filename).read_text()
 
-        table = rendered.split("<pre>", 1)[0]
+        table = rendered.split("<table>", 1)[1].split("</table>", 1)[0]
         self.assertIn("&lt;script&gt;alert(&#x27;x&#x27;)&lt;/script&gt; &amp; title",
                       table)
         self.assertIn("src/&lt;bad&gt;.cpp:5", table)

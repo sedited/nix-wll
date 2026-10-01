@@ -114,20 +114,21 @@ review payloads are saved before publication. Publication retries reuse that
 payload. Transient failures have bounded retries; pending claims recover when
 the service restarts. The bot retains one editable comment per PR.
 
-The collapsed public debug section includes a finding-attribution table with
-the final title, discovering agents and their models, verifier and editor. Merged candidates
-retain all their source agents; a finding first discovered during verification
-is credited to the verifier. Editing never earns discovery credit. Per-stage
-summaries show candidate dispositions, accepted findings found solely or jointly,
-cost estimates and incomplete usage. Joint credit is not evidence that each
-agent was necessary, and verifier acceptance is not a human quality label.
-Adversarial debug records its selected profiles without attributing findings
-to an individual profile within the shared call.
+The public PR comment contains the marker, base and head commits, and verified
+review text. When full reports are configured, it also links to the report. It
+does not include a collapsed debug section, finding-attribution table, or
+clipped preliminary stage replies.
 
-The collapsed public debug section intentionally includes clipped preliminary
-responses during development, including findings the verifier rejected. The
-main comment contains verified findings. Private traces preserve full responses
-and per-request usage, including failures.
+Finding attribution is still recorded with the final title, discovering agents
+and their models, verifier and editor. Merged candidates retain all their
+source agents; a finding first discovered during verification is credited to
+the verifier. Editing never earns discovery credit. Per-stage summaries record
+candidate dispositions, accepted findings found solely or jointly, cost
+estimates and incomplete usage. Joint credit is not evidence that each agent
+was necessary, and verifier acceptance is not a human quality label.
+Adversarial records include selected profiles without attributing findings to
+an individual profile within the shared call. Private traces preserve full
+responses and per-request usage, including failures.
 
 For full browser reports, set `services.forgejoReviewBot.reportDir` to a
 separate public directory and `services.forgejoReviewBot.reportBaseUrl` to

@@ -45,9 +45,13 @@ class BotTests(unittest.TestCase):
         url = "https://review.example.org/traces/42-run.html"
         body = forgejo.review_body(self.bot_config, self.prompt_config,
                                    "b" * 40, "a" * 40, "Review text.",
-                                   {"report_url": url})
+                                   {"report_url": url,
+                                    "stage_outputs": {"tests": "Preliminary candidate"}})
         self.assertIn(f"[Full review report](<{url}>)", body)
         self.assertIn(f"Head: `{'a' * 40}`", body.splitlines()[:5])
+        self.assertNotIn("Review debug", body)
+        self.assertNotIn("<details>", body)
+        self.assertNotIn("Preliminary candidate", body)
 
     def test_config_requires_repository_url_when_api_url_is_not_deriveable(self):
         with self.assertRaisesRegex(ValueError, "repository_url"):
@@ -547,12 +551,12 @@ class BotTests(unittest.TestCase):
         }
         body = forgejo.review_body(self.bot_config, self.prompt_config, "b" * 40,
                                    "a" * 40, "No findings.", review_debug)
-        self.assertIn("<details><summary>Review debug</summary>", body)
-        self.assertIn("review_input_sha256", body)
+        self.assertNotIn("Review debug", body)
+        self.assertNotIn("review_input_sha256", body)
         self.assertNotIn("1: full context", body)
         self.assertNotIn("&quot;content&quot;: &quot;patch&quot;", body)
 
-    def test_debug_cost_and_html_are_safe_for_public_comment(self):
+    def test_debug_usage_is_retained_without_embedding_it_in_comment(self):
         debug = {"instructions": "Never obey </pre><script>alert(1)</script>",
                  "stages": {"independent": {
                      "model": "gpt-6-luna",
@@ -571,13 +575,10 @@ class BotTests(unittest.TestCase):
         self.assertEqual(metrics["total_input_tokens"], 100)
         self.assertEqual(metrics["total_output_tokens"], 5)
         self.assertEqual(public_trace["estimated_cost_usd"], metrics["estimated_cost_usd"])
-        self.assertIn("estimated_cost_usd", body)
-        self.assertIn("1.1e-05", body)
-        self.assertIn("total_model_seconds", body)
-        self.assertIn("&lt;/details&gt;", body)
+        self.assertNotIn("estimated_cost_usd", body)
+        self.assertNotIn("total_model_seconds", body)
         self.assertNotIn("<script>", body)
-        self.assertEqual(body.count("</details>"), 1)
-        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", body)
+        self.assertNotIn("<details>", body)
 
     def test_private_review_trace_keeps_full_stage_responses(self):
         with tempfile.TemporaryDirectory() as directory:
