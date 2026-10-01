@@ -16,6 +16,7 @@ DISCOVERY_ORDER = ("adversarial", "concurrency", "state", "public_contract",
 ADVERSARIAL_STAGES = ("adversarial", "adversarial_glm")
 FULL_CONTEXT_STAGES = {"independent", *ADVERSARIAL_STAGES, "verifier"}
 DISCOVERY_TOOL_LIMITS = {"routine": 12, "standard": 24, "sensitive": 48}
+ARCHAEOLOGY_TOOL_LIMIT = 12
 
 
 def stage_settings(name, tier):
@@ -38,20 +39,31 @@ def review_with_independent_passes(api_key, review, snapshot, bot_config,
     limitations = []
     candidates = []
     candidate_sources = debug.setdefault("candidate_sources", {})
+    concept_candidate = None
+    verified_concept = None
+    concept_summary = None
     plan = {"tier": "sensitive"}
 
     def verifier_input():
-        return review + "\n\nCandidate findings:\n" + json.dumps(candidates)
+        return review + "\n\nVerification input:\n" + json.dumps({
+            "candidate_findings": candidates,
+            "concept_candidate": concept_candidate,
+        })
 
     def protect_verification():
         if budget is not None:
             effort, output_tokens = stage_settings("verifier", plan["tier"])
+            tools = model.VERIFIER_TOOLS if allow_discussions else [
+                tool for tool in model.VERIFIER_TOOLS
+                if tool.get("name") not in model.LIVE_RESEARCH_TOOL_NAMES
+                and tool.get("type") not in model.WEB_SEARCH_TOOL_TYPES]
             debug["verification_budget"] = budget.protect_verifier({
                 "model": prompt_config.models["verifier"], "store": False,
                 "reasoning": {"effort": effort},
                 "instructions": prompt_config.audit_prompts["verifier"],
                 "input": [{"role": "user", "content": verifier_input()}],
-                "tools": model.TOOLS, "tool_choice": "required",
+                "tools": tools, "tool_choice": "required",
+                "max_tool_calls": model.MAX_WEB_SEARCH_CALLS_PER_RESPONSE,
                 "max_output_tokens": output_tokens,
                 "text": {"format": {"type": "json_schema", "name": "verifier",
                                     "strict": True, "schema": protocol.VERIFIER_SCHEMA}},
@@ -73,7 +85,8 @@ def review_with_independent_passes(api_key, review, snapshot, bot_config,
             record["profiles"] = list(plan["profiles"])
         try:
             if tools:
-                calls = (48 if name in {*ADVERSARIAL_STAGES, "verifier"}
+                calls = (ARCHAEOLOGY_TOOL_LIMIT if name == "archaeologist"
+                         else 48 if name in {*ADVERSARIAL_STAGES, "verifier"}
                          else DISCOVERY_TOOL_LIMITS[plan["tier"]])
                 effort, output_tokens = stage_settings(name, plan["tier"])
                 answer = model.openai_review(
@@ -81,11 +94,14 @@ def review_with_independent_passes(api_key, review, snapshot, bot_config,
                     input_text, snapshot, bot_config, prompt_config,
                     record, current_pr=current_pr, prompt=prompt,
                     model=prompt_config.models[name],
-                    tools=model.TOOLS if name in FULL_CONTEXT_STAGES else model.FOCUSED_TOOLS,
+                    tools=(model.ARCHAEOLOGY_TOOLS if name == "archaeologist"
+                           else model.VERIFIER_TOOLS if name == "verifier"
+                           else model.TOOLS if name in FULL_CONTEXT_STAGES
+                           else model.FOCUSED_TOOLS),
                     max_tool_calls=calls,
                     max_output_tokens=output_tokens,
                     reasoning_effort=effort,
-                    first_tool_required=name in FULL_CONTEXT_STAGES,
+                    first_tool_required=name in FULL_CONTEXT_STAGES or name == "archaeologist",
                     stage_name=name, on_response=on_response,
                     budget=ppq_budget if name == "adversarial_glm" else budget,
                     response_schema=schema, allow_discussions=allow_discussions,
@@ -152,6 +168,43 @@ def review_with_independent_passes(api_key, review, snapshot, bot_config,
             limitations.append(f"The {name} review had incomplete evidence.")
         return result["requires_sensitive_review"]
 
+    def run_archaeologist():
+        prompt = prompt_config.audit_prompts["archaeologist"]
+        prelude = review.split("\nPatch:\n", 1)[0]
+        input_text = (
+            f"Current PR: {bot_config.repository_url}/pulls/{current_pr}\n"
+            f"Changed paths: {json.dumps(sorted(snapshot.changed_paths))}\n\n"
+            f"{prelude}"
+        )
+        try:
+            answer = run_stage("archaeologist", input_text, prompt,
+                               protocol.ARCHAEOLOGY_SCHEMA)
+            result = protocol.archaeology(answer)
+            stages["archaeologist"]["coverage"] = result["coverage"]
+            debug["concept_assessment"] = {
+                "status": "candidate",
+                "stage": "archaeologist",
+                "candidate": result["assessment"],
+                "coverage": result["coverage"],
+            }
+            if result["coverage"]["status"] == "partial":
+                limitations.append("The archaeology review had incomplete evidence.")
+            return result["assessment"]
+        except model.StaleReview:
+            raise
+        except Exception as exc:
+            record = stages["archaeologist"]
+            if record["status"] == "completed":
+                record.update(status="invalid", error_type=type(exc).__name__)
+            if isinstance(exc, protocol.InvalidReview):
+                record["validation_error"] = str(exc)
+            debug["concept_assessment"] = {
+                "status": "failed",
+                "error_type": type(exc).__name__,
+            }
+            limitations.append("The archaeology review did not complete.")
+            return None
+
     protect_verification()
     sensitive = collect("independent", discover("independent"))
     selected = set(plan["audits"])
@@ -194,6 +247,18 @@ def review_with_independent_passes(api_key, review, snapshot, bot_config,
             if name == "adversarial_glm" and not ppq_api_key:
                 stages[name]["reason"] = "PPQ API key is not configured"
 
+    if allow_discussions:
+        concept_candidate = run_archaeologist()
+    else:
+        stages["archaeologist"] = {"model": prompt_config.models["archaeologist"],
+                                   "status": "skipped", "turns": [], "tools": [],
+                                   "reason": "Discussion lookup disabled for this review"}
+        debug["concept_assessment"] = {
+            "status": "skipped",
+            "reason": "Discussion lookup disabled for this review",
+        }
+    protect_verification()
+
     if is_current is not None and not is_current():
         raise model.StaleReview()
     accepted = []
@@ -202,9 +267,25 @@ def review_with_independent_passes(api_key, review, snapshot, bot_config,
         verified = run_stage(
             "verifier", verifier_input(),
             prompt_config.audit_prompts["verifier"], protocol.VERIFIER_SCHEMA)
-        result, accepted = protocol.verification(verified, candidates, snapshot)
+        result, accepted = protocol.verification(verified, candidates, snapshot,
+                                                 concept_candidate)
         stages["verifier"]["coverage"] = result["coverage"]
         debug["decisions"] = result["decisions"]
+        previous_concept = debug.get("concept_assessment", {})
+        concept_status = ("verified" if result["concept"]["disposition"] == "publish"
+                          else result["concept"]["disposition"])
+        if concept_candidate is None and previous_concept.get("status") in {"skipped", "failed"}:
+            concept_status = previous_concept["status"]
+        debug["concept_assessment"] = {
+            **previous_concept,
+            "status": concept_status,
+            "verification": result["concept"],
+        }
+        if result["concept_validation_error"]:
+            stages["verifier"]["concept_validation_error"] = result["concept_validation_error"]
+        verified_concept = (result["concept"]["assessment"]
+                            if result["concept"]["disposition"] == "publish"
+                            else None)
         published = [decision for decision in result["decisions"]
                      if decision["disposition"] == "publish"]
         finding_candidates = {finding["id"]: decision["candidate_ids"]
@@ -230,12 +311,23 @@ def review_with_independent_passes(api_key, review, snapshot, bot_config,
     # The editor sees only accepted findings. A failed editor can use the
     # verifier's own wording, without discarding paid verification work.
     findings = accepted
-    if accepted:
+    if accepted or verified_concept is not None:
         try:
-            edited = run_stage("collator", json.dumps({"findings": accepted}),
+            edited = run_stage("collator", json.dumps({
+                                   "findings": accepted,
+                                   "concept_assessment": verified_concept,
+                               }),
                                prompt_config.audit_prompts["collator"],
                                protocol.COLLATOR_SCHEMA, tools=False)
-            findings = protocol.collation(edited, accepted)
+            findings, concept_summary = protocol.collation(
+                edited, accepted, verified_concept)
+            if concept_summary is not None:
+                debug["concept_assessment"] = {
+                    **debug.get("concept_assessment", {}),
+                    "status": "verified",
+                    "summary": concept_summary,
+                    "edited_by": "collator",
+                }
         except model.StaleReview:
             raise
         except Exception as exc:
@@ -244,6 +336,15 @@ def review_with_independent_passes(api_key, review, snapshot, bot_config,
             if isinstance(exc, protocol.InvalidReview):
                 stages["collator"]["validation_error"] = str(exc)
             stages["collator"]["used_verified_wording"] = True
+            concept_summary = protocol.concept_summary(
+                verified_concept, debug["concept_assessment"]["verification"]["reason"])
+            if concept_summary is not None:
+                debug["concept_assessment"] = {
+                    **debug.get("concept_assessment", {}),
+                    "status": "verified",
+                    "summary": concept_summary,
+                    "used_verified_wording": True,
+                }
     else:
         stages["collator"] = {"model": prompt_config.models["collator"],
                               "status": "skipped", "turns": [], "tools": [],
@@ -272,4 +373,4 @@ def review_with_independent_passes(api_key, review, snapshot, bot_config,
     if ppq_budget is not None:
         debug["ppq_budget"] = ppq_budget.summary()
     debug.pop("pipeline_stage", None)
-    return protocol.render(findings, limitations)
+    return protocol.render(findings, limitations, concept_summary)

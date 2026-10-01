@@ -1,6 +1,8 @@
 """Structured stage results and the boundary between findings and prose."""
 
 import json
+import re
+from urllib.parse import urlsplit
 
 
 class InvalidReview(ValueError):
@@ -14,6 +16,8 @@ def object_schema(properties):
 
 STRING = {"type": "string"}
 STRINGS = {"type": "array", "items": STRING}
+PROVENANCE = {"type": "string", "enum": ["current_pr", "prior_discussion",
+                                         "history", "web", "agent_inference"]}
 COVERAGE = object_schema({
     "status": {"type": "string", "enum": ["complete", "partial"]},
     "limitations": STRINGS,
@@ -36,8 +40,39 @@ DISCOVERY_SCHEMA = object_schema({
     "requires_sensitive_review": {"type": "boolean"},
     "findings": {"type": "array", "items": CANDIDATE},
 })
+CONCEPT_ALTERNATIVE = object_schema({
+    "name": STRING,
+    "concept": STRING,
+    "benefit": STRING,
+    "cost": STRING,
+    "unresolved": STRING,
+    "provenance": PROVENANCE,
+    "citations": STRINGS,
+})
+CONCEPT_ASSESSMENT = object_schema({
+    "problem": STRING,
+    "baseline": STRING,
+    "delivered_benefit": STRING,
+    "relevant_history": STRING,
+    "alternatives": {"type": "array", "items": CONCEPT_ALTERNATIVE},
+    "recommendation": STRING,
+    "decisive_question": STRING,
+    "technical_assumptions": STRINGS,
+    "citations": STRINGS,
+})
+ARCHAEOLOGY_SCHEMA = object_schema({
+    "coverage": COVERAGE,
+    "assessment": CONCEPT_ASSESSMENT,
+})
+CONCEPT_VERIFICATION = object_schema({
+    "disposition": {"type": "string", "enum": ["publish", "drop", "unresolved",
+                                               "no_concern"]},
+    "reason": STRING,
+    "assessment": {"anyOf": [CONCEPT_ASSESSMENT, {"type": "null"}]},
+})
 VERIFIER_SCHEMA = object_schema({
     "coverage": COVERAGE,
+    "concept": CONCEPT_VERIFICATION,
     "decisions": {"type": "array", "items": object_schema({
         "candidate_ids": STRINGS,
         "disposition": {"type": "string", "enum": ["publish", "drop", "unresolved"]},
@@ -46,6 +81,7 @@ VERIFIER_SCHEMA = object_schema({
     })},
 })
 COLLATOR_SCHEMA = object_schema({
+    "concept_summary": {"anyOf": [STRING, {"type": "null"}]},
     "findings": {"type": "array", "items": object_schema({
         "id": STRING, "title": STRING, "body": STRING,
     })},
@@ -60,6 +96,31 @@ def _object(value, keys):
 def _strings(value):
     if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
         raise InvalidReview("Expected a list of strings")
+
+
+def _citations(value):
+    _strings(value)
+    if any(not _safe_http_url(item) for item in value):
+        raise InvalidReview("Citations must be HTTP(S) links")
+
+
+def _safe_http_url(value):
+    if not isinstance(value, str):
+        return False
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return False
+    return (parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+            and bool(parsed.hostname) and parsed.username is None
+            and parsed.password is None)
+
+
+def _summary_urls(value):
+    if not isinstance(value, str):
+        return set()
+    return {url for url in re.findall(r"https?://[^\s<>)\]]+", value)
+            if _safe_http_url(url)}
 
 
 def _text(record, keys, empty=()):
@@ -107,12 +168,77 @@ def discovery(text, stage, snapshot):
     return result
 
 
-def verification(text, candidates, snapshot):
+def _concept_assessment(value):
+    _object(value, CONCEPT_ASSESSMENT["properties"])
+    _text(value, ("problem", "baseline", "delivered_benefit", "relevant_history",
+                  "recommendation", "decisive_question"))
+    _strings(value["technical_assumptions"])
+    _citations(value["citations"])
+    alternatives = value["alternatives"]
+    if not isinstance(alternatives, list) or not 1 <= len(alternatives) <= 4:
+        raise InvalidReview("Concept assessment must compare one to four alternatives")
+    for alternative in alternatives:
+        _object(alternative, CONCEPT_ALTERNATIVE["properties"])
+        _text(alternative, ("name", "concept", "benefit", "cost", "unresolved"))
+        _citations(alternative["citations"])
+        if alternative["provenance"] not in CONCEPT_ALTERNATIVE["properties"]["provenance"]["enum"]:
+            raise InvalidReview("Invalid alternative provenance")
+
+
+def _concept_citations(assessment):
+    if assessment is None:
+        return []
+    citations = list(assessment["citations"])
+    for alternative in assessment["alternatives"]:
+        citations.extend(alternative["citations"])
+    return list(dict.fromkeys(citations))
+
+
+def concept_summary(assessment, reason):
+    if assessment is None:
+        return None
+    citations = _concept_citations(assessment)
+    source_text = "" if not citations else " " + " ".join(
+        f"[{index}]({citation})" for index, citation in enumerate(citations, 1))
+    return f"{assessment['recommendation']} {reason}{source_text}"
+
+
+def archaeology(text):
+    result = json.loads(text)
+    _object(result, ARCHAEOLOGY_SCHEMA["properties"])
+    _coverage(result["coverage"])
+    _concept_assessment(result["assessment"])
+    return result
+
+
+def verification(text, candidates, snapshot, concept_assessment=None):
     result = json.loads(text)
     _object(result, VERIFIER_SCHEMA["properties"])
     _coverage(result["coverage"])
     if not isinstance(result["decisions"], list):
         raise InvalidReview("Invalid verifier decisions")
+    concept = result["concept"]
+    result["concept_validation_error"] = None
+    try:
+        _object(concept, CONCEPT_VERIFICATION["properties"])
+        if concept["disposition"] not in ("publish", "drop", "unresolved", "no_concern"):
+            raise InvalidReview("Invalid concept disposition")
+        _text(concept, ("reason",))
+        if concept["disposition"] == "publish":
+            if concept_assessment is None:
+                raise InvalidReview("Concept assessment had no archaeology candidate")
+            _concept_assessment(concept["assessment"])
+        elif concept["assessment"] is not None:
+            raise InvalidReview("Only publish may include a concept assessment")
+    except InvalidReview as exc:
+        error = str(exc)
+        concept = {"disposition": "unresolved", "assessment": None,
+                   "reason": f"Concept assessment withheld: {error}"}
+        result["concept"] = concept
+        result["concept_validation_error"] = error
+    if concept["disposition"] == "unresolved":
+        result["coverage"]["status"] = "partial"
+        result["coverage"]["limitations"].append(concept["reason"])
     expected = {candidate["id"] for candidate in candidates}
     seen = set()
     accepted = []
@@ -155,11 +281,26 @@ def verification(text, candidates, snapshot):
     return result, accepted
 
 
-def collation(text, accepted):
+def collation(text, accepted, concept_assessment=None):
     result = json.loads(text)
     _object(result, COLLATOR_SCHEMA["properties"])
     if not isinstance(result["findings"], list):
         raise InvalidReview("Invalid collator findings")
+    concept_summary = result["concept_summary"]
+    if concept_summary is not None and (
+            not isinstance(concept_summary, str) or not concept_summary.strip()):
+        raise InvalidReview("Invalid concept summary")
+    if concept_assessment is None and concept_summary is not None:
+        raise InvalidReview("Collator invented a concept summary")
+    if concept_assessment is not None and concept_summary is None:
+        raise InvalidReview("Collator omitted the accepted concept assessment")
+    if concept_summary is not None:
+        summary_urls = _summary_urls(concept_summary)
+        citations = set(_concept_citations(concept_assessment))
+        if citations - summary_urls:
+            raise InvalidReview("Collator omitted a concept citation")
+        if summary_urls - citations:
+            raise InvalidReview("Collator added an unverified concept citation")
     originals = {finding["id"]: finding for finding in accepted}
     seen = set()
     edited = []
@@ -173,11 +314,13 @@ def collation(text, accepted):
         edited.append({**originals[identifier], **finding})
     if seen != set(originals):
         raise InvalidReview("Collator omitted an accepted finding")
-    return edited
+    return edited, concept_summary
 
 
-def render(findings, limitations=()):
+def render(findings, limitations=(), concept_summary=None):
     sections = []
+    if concept_summary:
+        sections.append(f"##### Concept and approach\n\n{concept_summary}")
     groups = {}
     for finding in findings:
         section = "design" if finding["kind"] == "design" else finding["severity"]

@@ -14,6 +14,42 @@ def discovery(findings=(), sensitive=False):
                        "requires_sensitive_review": sensitive})
 
 
+def assessment():
+    return {
+        "problem": "Reviewers do not have enough context on prior attempts.",
+        "baseline": "Reviewers can read the PR discussion manually.",
+        "delivered_benefit": "The bot can summarize prior conceptual objections.",
+        "relevant_history": "Prior discussion raised a layering concern.",
+        "alternatives": [{
+            "name": "Do nothing",
+            "concept": "Keep the current review flow.",
+            "benefit": "No extra review cost.",
+            "cost": "The bot may miss repeated conceptual objections.",
+            "unresolved": "Whether reviewers already catch this reliably.",
+            "provenance": "agent_inference",
+            "citations": [],
+        }],
+        "recommendation": "The submitted concept is acceptable.",
+        "decisive_question": "Whether maintainers want discussion history in bot output.",
+        "technical_assumptions": ["The discussion API returns human comments."],
+        "citations": ["https://example.invalid/o/r/pulls/42"],
+    }
+
+
+def archaeology(concept=None):
+    return json.dumps({"coverage": COMPLETE, "assessment": concept or assessment()})
+
+
+def verification(decisions=(), concept=None):
+    return json.dumps({
+        "coverage": COMPLETE,
+        "concept": concept or {"disposition": "no_concern",
+                               "reason": "No material concept concern",
+                               "assessment": None},
+        "decisions": list(decisions),
+    })
+
+
 def candidate(title="Simplify fixture"):
     return {"kind": "suggestion", "path": "src/example.cpp", "line": 3, "side": "head",
             "title": title, "claim": "Duplicate setup", "consequence": "Two fixtures to maintain",
@@ -44,20 +80,32 @@ class PipelineTests(unittest.TestCase):
 
     def edit(self, api_key, name, prompt, input_text, prompt_config, **kwargs):
         self.assertEqual(name, "collator")
-        findings = json.loads(input_text)["findings"]
+        payload = json.loads(input_text)
+        findings = payload["findings"]
         self.assertNotIn("Rejected claim", input_text)
-        return json.dumps({"findings": [
+        concept_summary = None
+        if payload.get("concept_assessment") is not None:
+            concept_summary = (payload["concept_assessment"]["recommendation"]
+                               + " https://example.invalid/o/r/pulls/42")
+        return json.dumps({"concept_summary": concept_summary, "findings": [
             {"id": item["id"], "title": item["title"], "body": item["body"]} for item in findings
         ]}), {"status": "completed"}
 
-    def run_review(self, reviewer, editor=None, budget=None, ppq_api_key=None, ppq_budget=None):
+    def run_review(self, reviewer, editor=None, budget=None, ppq_api_key=None, ppq_budget=None,
+                   allow_discussions=True):
+        def wrapped_reviewer(*args, **kwargs):
+            if kwargs["stage_name"] == "archaeologist":
+                return getattr(self, "archaeology_output", archaeology())
+            return reviewer(*args, **kwargs)
+
         with patch.object(pipeline.routing, "plan_review", side_effect=self.plan), \
-                patch.object(model, "openai_review", side_effect=reviewer), \
+                patch.object(model, "openai_review", side_effect=wrapped_reviewer), \
                 patch.object(model, "run_audit", side_effect=editor or self.edit), \
                 patch.object(pipeline, "audit_developer_notes", return_value="Policy"):
             return pipeline.review_with_independent_passes(
                 "key", "PR diff", self.snapshot, self.config, self.prompts, 42, self.debug,
-                budget=budget, ppq_api_key=ppq_api_key, ppq_budget=ppq_budget)
+                budget=budget, ppq_api_key=ppq_api_key, ppq_budget=ppq_budget,
+                allow_discussions=allow_discussions)
 
     def test_parallel_adversarial_models_share_context_and_attribute_merged_finding(self):
         self.tier, self.audits = "sensitive", []
@@ -86,13 +134,14 @@ class PipelineTests(unittest.TestCase):
                 rendezvous.wait(timeout=5)
                 return discovery([candidate()])
             if stage == "verifier":
-                candidates = json.loads(args[1].split("Candidate findings:\n")[1])
+                candidates = json.loads(args[1].split("Verification input:\n")[1])[
+                    "candidate_findings"]
                 self.assertEqual([item["id"] for item in candidates],
                                  ["adversarial:1", "adversarial_glm:1"])
-                return json.dumps({"coverage": COMPLETE, "decisions": [
+                return verification([
                     {"candidate_ids": ["adversarial:1", "adversarial_glm:1"],
                      "disposition": "publish", "reason": "Shared finding",
-                     "finding": self.published}]})
+                     "finding": self.published}])
             return discovery()
 
         self.run_review(review, ppq_api_key="ppq-key",
@@ -119,11 +168,11 @@ class PipelineTests(unittest.TestCase):
             if stage == "tests":
                 return discovery([candidate("Rejected claim")])
             if stage == "verifier":
-                return json.dumps({"coverage": COMPLETE, "decisions": [
+                return verification([
                     {"candidate_ids": ["design:1"], "disposition": "publish",
                      "reason": "Useful simplification", "finding": self.published},
                     {"candidate_ids": ["tests:1"], "disposition": "drop",
-                     "reason": "Guard already covers it", "finding": None}]})
+                     "reason": "Guard already covers it", "finding": None}])
             return discovery()
 
         content = self.run_review(review)
@@ -149,7 +198,7 @@ class PipelineTests(unittest.TestCase):
                 args[5]["turns"].append({"input_tokens": 100, "output_tokens": 10})
                 raise TimeoutError()
             if stage == "verifier":
-                return json.dumps({"coverage": COMPLETE, "decisions": []})
+                return verification()
             return discovery()
 
         content = self.run_review(review)
@@ -169,7 +218,7 @@ class PipelineTests(unittest.TestCase):
             stage = kwargs["stage_name"]
             self.calls.append(stage)
             if stage == "verifier":
-                return json.dumps({"coverage": COMPLETE, "decisions": []})
+                return verification()
             return discovery(sensitive=stage == "public_contract")
 
         self.run_review(review)
@@ -186,7 +235,7 @@ class PipelineTests(unittest.TestCase):
                     stage = kwargs["stage_name"]
                     limits[stage] = kwargs["max_tool_calls"]
                     if stage == "verifier":
-                        return json.dumps({"coverage": COMPLETE, "decisions": []})
+                        return verification()
                     return discovery(sensitive=stage == "tests" and tier == "standard")
 
                 self.run_review(review)
@@ -214,9 +263,9 @@ class PipelineTests(unittest.TestCase):
             prompts[stage] = kwargs["prompt"]
             inputs[stage] = args[1]
             if stage == "verifier":
-                return json.dumps({"coverage": COMPLETE, "decisions": [
+                return verification([
                     {"candidate_ids": ["adversarial:1"], "disposition": "drop",
-                     "reason": "Existing guard prevents the trigger", "finding": None}]})
+                     "reason": "Existing guard prevents the trigger", "finding": None}])
             return discovery([candidate()] if stage == "adversarial" else [])
 
         self.run_review(review)
@@ -249,9 +298,9 @@ class PipelineTests(unittest.TestCase):
             if stage == "independent":
                 return discovery([candidate()], sensitive=True)
             if stage == "verifier":
-                return json.dumps({"coverage": COMPLETE, "decisions": [
+                return verification([
                     {"candidate_ids": ["independent:1"], "disposition": "drop",
-                     "reason": "Existing guard", "finding": None}]})
+                     "reason": "Existing guard", "finding": None}])
             return discovery()
 
         self.run_review(review, budget=budget)
@@ -265,16 +314,16 @@ class PipelineTests(unittest.TestCase):
 
         def review(*args, **kwargs):
             if kwargs["stage_name"] == "verifier":
-                return json.dumps({"coverage": COMPLETE, "decisions": [
+                return verification([
                     {"candidate_ids": ["independent:1", "tests:1"], "disposition": "publish",
                      "reason": "Same root cause", "finding": self.published},
                     {"candidate_ids": [], "disposition": "publish",
                      "reason": "New verified issue", "finding": {
-                         **self.published, "title": "Verifier discovery"}}]})
+                         **self.published, "title": "Verifier discovery"}}])
             return discovery([candidate()])
 
         def edit(*args, **kwargs):
-            return json.dumps({"findings": [
+            return json.dumps({"concept_summary": None, "findings": [
                 {"id": "finding:2", "title": "Edited verifier finding", "body": "Verified text"},
                 {"id": "finding:1", "title": "Edited shared finding", "body": "Verified text"},
             ]}), {"status": "completed"}
@@ -292,7 +341,7 @@ class PipelineTests(unittest.TestCase):
         self.tier, self.audits = "routine", []
 
         def review(*args, **kwargs):
-            return (json.dumps({"coverage": COMPLETE, "decisions": []})
+            return (verification()
                     if kwargs["stage_name"] == "verifier" else discovery([candidate()]))
 
         content = self.run_review(review)
@@ -311,12 +360,12 @@ class PipelineTests(unittest.TestCase):
                 result["coverage"] = {"status": "partial", "limitations": ["Caller not inspected"]}
                 return json.dumps(result)
             if stage == "verifier":
-                return json.dumps({"coverage": COMPLETE, "decisions": [
+                return verification([
                     {"candidate_ids": ["tests:1"], "disposition": "publish",
                      "reason": "Useful simplification", "finding": self.published},
                     {"candidate_ids": [], "disposition": "publish",
                      "reason": "Policy requires release notes", "finding": {
-                         **self.published, "path": "doc/developer-notes.md"}}]})
+                         **self.published, "path": "doc/developer-notes.md"}}])
             return discovery()
 
         content = self.run_review(review)
@@ -334,9 +383,9 @@ class PipelineTests(unittest.TestCase):
                   "body": "Prefer the existing approach for this interface."}
 
         def review(*args, **kwargs):
-            return (json.dumps({"coverage": COMPLETE, "decisions": [
+            return (verification([
                 {"candidate_ids": ["independent:1"], "disposition": "publish",
-                 "reason": "Verified", "finding": design}]})
+                 "reason": "Verified", "finding": design}])
                 if kwargs["stage_name"] == "verifier" else discovery([{
                     **candidate(), "kind": "design"}]))
 
@@ -345,13 +394,59 @@ class PipelineTests(unittest.TestCase):
                 self.debug = {}
 
                 def edit(*args, **kwargs):
-                    return '{"findings":[]}', {"status": status}
+                    return '{"concept_summary":null,"findings":[]}', {"status": status}
 
                 content = self.run_review(review, edit)
                 self.assertIn(design["body"], content)
                 self.assertIn("Design and approach", content)
                 self.assertTrue(self.debug["stages"]["collator"]["used_verified_wording"])
                 self.assertIsNone(self.debug["finding_attribution"][0]["edited_by"])
+
+    def test_sound_concept_brief_stays_out_of_public_review(self):
+        self.tier, self.audits = "routine", []
+
+        def review(*args, **kwargs):
+            return verification() if kwargs["stage_name"] == "verifier" else discovery()
+
+        content = self.run_review(review)
+
+        self.assertNotIn("Concept and approach", content)
+        self.assertEqual(self.debug["concept_assessment"]["status"], "no_concern")
+        self.assertEqual(self.debug["finding_attribution"], [])
+
+    def test_verified_material_concept_concern_gets_public_paragraph(self):
+        self.tier, self.audits = "routine", []
+        concern = {**assessment(),
+                   "recommendation": "Doing nothing is conceptually stronger because the PR adds process cost."}
+        self.archaeology_output = archaeology(concern)
+
+        def review(*args, **kwargs):
+            if kwargs["stage_name"] == "verifier":
+                return verification(concept={
+                    "disposition": "publish",
+                    "reason": "The cited discussion supports a material process cost.",
+                    "assessment": concern,
+                })
+            return discovery()
+
+        content = self.run_review(review)
+
+        self.assertIn("Concept and approach", content)
+        self.assertIn("process cost", content)
+        self.assertIn("https://example.invalid/o/r/pulls/42", content)
+        self.assertEqual(self.debug["concept_assessment"]["status"], "verified")
+
+    def test_discussion_disabled_review_keeps_archaeology_skipped(self):
+        self.tier, self.audits = "routine", []
+
+        def review(*args, **kwargs):
+            return verification() if kwargs["stage_name"] == "verifier" else discovery()
+
+        content = self.run_review(review, allow_discussions=False)
+
+        self.assertNotIn("Concept and approach", content)
+        self.assertEqual(self.debug["concept_assessment"]["status"], "skipped")
+        self.assertEqual(self.debug["stages"]["archaeologist"]["status"], "skipped")
 
 
 if __name__ == "__main__":

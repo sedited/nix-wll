@@ -2,6 +2,7 @@
   "adversarial": "gpt-6.1-sol",
   "adversarial_glm": "glm-5.3",
   "build": "gpt-6-luna",
+  "archaeologist": "gpt-6-luna",
   "collator": "gpt-6-luna",
   "concurrency": "gpt-6-luna",
   "design": "gpt-6-luna",
