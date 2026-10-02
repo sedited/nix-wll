@@ -18,7 +18,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 
-from ralph import config, forgejo, model, pipeline, repository, service, spend
+from ralph import badge, config, forgejo, model, pipeline, repository, service, spend
 from ralph.jobs import JobStore
 
 
@@ -129,24 +129,31 @@ class ServiceTests(unittest.TestCase):
         self.jobs.save_result(job, {"debug": {"finding_attribution": [{"id": "F1"}]}})
         self.assertEqual(get(), grey)  # Saved but not published.
         self.jobs.complete(job)
-        green = get()
-        self.assertNotEqual(green, grey)
+        orange = get()
+        self.assertEqual(orange, badge._png((247, 147, 26)))
+        self.assertNotEqual(orange, grey)
         self.assertEqual(get("/assets/owner/repo/999.png"), grey)
         job = self.enqueue("b" * 40)
         self.assertEqual(get(), grey)  # A new head invalidates the badge.
         self.jobs.save_result(job, {"debug": {"finding_attribution": []}})
         self.jobs.complete(job)
-        self.assertEqual(get(), grey)
+        green = get()
+        self.assertNotEqual(green, grey)
+        self.assertNotEqual(green, orange)
         job = self.enqueue("c" * 40)
         self.jobs.save_result(job, {"debug": {"concept_assessment": {
             "status": "verified", "summary": "A material concern.",
             "verification": {"disposition": "publish", "assessment": {
                 "assessment": "rework_approach"}}}}})
         self.jobs.complete(job)
-        self.assertEqual(get(), green)
+        self.assertEqual(get(), orange)
         job = self.enqueue("d" * 40)
         self.jobs.save_result(job, {"debug": {"finding_attribution": [{"id": "F1"}]}})
         self.jobs.fail(job, "Publication failed")
+        self.assertEqual(get(), grey)
+        job = self.enqueue("e" * 40)
+        self.jobs.save_result(job, {"debug": {"skip": "Input exceeds limit"}})
+        self.jobs.complete(job)
         self.assertEqual(get(), grey)
         for path in ("/assets/other/repo/42.png", "/assets/owner/repo/0.png",
                      "/assets/owner/repo/42.svg", "/assets/owner/repo/" + "9" * 100 + ".png"):

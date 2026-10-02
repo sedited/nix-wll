@@ -222,12 +222,16 @@ automatically rerun previously reviewed heads.
 ## Review status images
 
 The HTTP listener serves `GET /assets/<owner>/<repo>/<pr>.png` for the
-configured repository. It returns a 16 by 16 PNG dot, green when the latest
-queued review has completed publication with verified findings or a published
-conceptual concern. Otherwise it returns grey, including unknown PRs, pending
-or failed reviews, and reviews with nothing to say. A new queued generation
-resets the dot to grey until publication completes. Existing saved results
-work immediately; no model calls or backfill are needed.
+configured repository. It returns a transparent 16 by 16 PNG dot:
+
+- Grey when no completed review exists for the latest queued generation,
+  including unknown PRs and pending, failed or skipped reviews.
+- Green when the published review has no findings or conceptual concern.
+- Bitcoin orange (`#f7931a`) when the published review has verified findings
+  or a conceptual concern.
+
+A new queued generation resets the dot to grey until publication completes.
+Existing saved results work immediately; no model calls or backfill are needed.
 
 Forward `/assets/` to Ralph's listener alongside `/webhooks/forgejo`, preserving
 the full path. This endpoint works independently of `reportDir`; the proxy

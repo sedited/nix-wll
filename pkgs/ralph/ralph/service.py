@@ -308,8 +308,12 @@ def make_handler(secret, jobs, bot_config):
                 self.send_error(503)
                 return
             debug = result.get("debug", {}) if result else {}
-            image = (badge.GREEN if trace.finding_attribution(debug)
-                     or trace.published_concept_concern(debug) else badge.GREY)
+            if result is None or debug.get("skip"):
+                image = badge.GREY
+            elif trace.finding_attribution(debug) or trace.published_concept_concern(debug):
+                image = badge.ORANGE
+            else:
+                image = badge.GREEN
             self.send_response(200)
             self.send_header("Content-Type", "image/png")
             self.send_header("Content-Length", str(len(image)))
