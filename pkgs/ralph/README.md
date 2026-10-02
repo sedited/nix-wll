@@ -40,6 +40,12 @@ tools; if the PR prelude and manifest still exceed 200,000 bytes, review is skip
 Sources: [service.py](ralph/service.py),
 [jobs.py](ralph/jobs.py), [repository.py](ralph/repository.py).
 
+The HTTP listener also serves per-PR PNG status dots at
+`/assets/<owner>/<repo>/<pr>.png`. They are green only when the latest queued
+review has completed publication with findings or a conceptual concern, and
+grey otherwise. Status comes from the existing job store without model or
+Forgejo API calls. See the module documentation for proxy setup.
+
 ## Audit selection
 
 ```mermaid

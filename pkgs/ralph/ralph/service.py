@@ -14,7 +14,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import config, forgejo, model, pipeline, report, repository, spend, trace
+from . import badge, config, forgejo, model, pipeline, report, repository, spend, trace
 from .jobs import JobStore
 from .repository import BRANCH, SHA
 
@@ -293,6 +293,31 @@ def worker(jobs, state_dir, api_key, forgejo_token, bot_login, bot_config,
 
 def make_handler(secret, jobs, bot_config):
     class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            request_path = urllib.parse.urlsplit(self.path).path
+            match = re.fullmatch(
+                rf"/assets/{re.escape(bot_config.repository)}/([1-9][0-9]{{0,18}})\.png",
+                request_path)
+            if match is None or int(match[1]) > 2 ** 63 - 1:
+                self.send_error(404)
+                return
+            try:
+                result = jobs.latest_completed_result(int(match[1]))
+            except sqlite3.Error:
+                logging.exception("Could not read review badge status")
+                self.send_error(503)
+                return
+            debug = result.get("debug", {}) if result else {}
+            image = (badge.GREEN if trace.finding_attribution(debug)
+                     or trace.published_concept_concern(debug) else badge.GREY)
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(len(image)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            self.wfile.write(image)
+
         def do_POST(self):
             request_path = urllib.parse.urlsplit(self.path).path
             if request_path != "/webhooks/forgejo":

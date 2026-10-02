@@ -3,11 +3,13 @@ import hmac
 import http.client
 import json
 import sqlite3
+import struct
 import tempfile
 import threading
 import unittest
 import urllib.error
 import urllib.request
+import zlib
 from http.server import ThreadingHTTPServer
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
@@ -81,6 +83,78 @@ class ServiceTests(unittest.TestCase):
         restarted = JobStore(self.state_dir / "jobs.sqlite3")
         job = restarted.claim()
         self.assertEqual((job["number"], job["head"]), (42, "a" * 40))
+
+    def test_review_badge_tracks_latest_published_feedback(self):
+        server = ThreadingHTTPServer(
+            ("127.0.0.1", 0),
+            service.make_handler(b"secret", self.jobs, self.bot_config))
+        thread = threading.Thread(target=server.serve_forever,
+                                  kwargs={"poll_interval": 0.01}, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+
+        def get(path="/assets/owner/repo/42.png"):
+            with closing(http.client.HTTPConnection("127.0.0.1", server.server_port)) as connection:
+                connection.request("GET", path)
+                response = connection.getresponse()
+                body = response.read()
+                self.assertEqual(response.status, 200)
+                self.assertEqual(response.getheader("Content-Type"), "image/png")
+                self.assertEqual(response.getheader("Cache-Control"), "no-store")
+                self.assertEqual(int(response.getheader("Content-Length")), len(body))
+                self.assertTrue(body.startswith(b"\x89PNG\r\n\x1a\n"))
+                return body
+
+        grey = get()
+        self.assertEqual(struct.unpack("!II", grey[16:24]), (16, 16))
+        offset = 8
+        compressed = bytearray()
+        while offset < len(grey):
+            size = struct.unpack("!I", grey[offset:offset + 4])[0]
+            kind = grey[offset + 4:offset + 8]
+            data = grey[offset + 8:offset + 8 + size]
+            crc = struct.unpack("!I", grey[offset + 8 + size:offset + 12 + size])[0]
+            self.assertEqual(crc, zlib.crc32(kind + data))
+            if kind == b"IDAT":
+                compressed.extend(data)
+            offset += size + 12
+        pixels = zlib.decompress(compressed)
+        self.assertEqual(len(pixels), 16 * (1 + 16 * 4))
+        self.assertEqual(pixels[1:5], bytes((128, 128, 128, 0)))
+        center = 8 * 65 + 1 + 8 * 4
+        self.assertEqual(pixels[center:center + 4], bytes((128, 128, 128, 255)))
+        job = self.enqueue()
+        self.jobs.save_result(job, {"debug": {"finding_attribution": [{"id": "F1"}]}})
+        self.assertEqual(get(), grey)  # Saved but not published.
+        self.jobs.complete(job)
+        green = get()
+        self.assertNotEqual(green, grey)
+        self.assertEqual(get("/assets/owner/repo/999.png"), grey)
+        job = self.enqueue("b" * 40)
+        self.assertEqual(get(), grey)  # A new head invalidates the badge.
+        self.jobs.save_result(job, {"debug": {"finding_attribution": []}})
+        self.jobs.complete(job)
+        self.assertEqual(get(), grey)
+        job = self.enqueue("c" * 40)
+        self.jobs.save_result(job, {"debug": {"concept_assessment": {
+            "status": "verified", "summary": "A material concern.",
+            "verification": {"disposition": "publish", "assessment": {
+                "assessment": "rework_approach"}}}}})
+        self.jobs.complete(job)
+        self.assertEqual(get(), green)
+        job = self.enqueue("d" * 40)
+        self.jobs.save_result(job, {"debug": {"finding_attribution": [{"id": "F1"}]}})
+        self.jobs.fail(job, "Publication failed")
+        self.assertEqual(get(), grey)
+        for path in ("/assets/other/repo/42.png", "/assets/owner/repo/0.png",
+                     "/assets/owner/repo/42.svg", "/assets/owner/repo/" + "9" * 100 + ".png"):
+            with closing(http.client.HTTPConnection("127.0.0.1", server.server_port)) as connection:
+                connection.request("GET", path)
+                response = connection.getresponse()
+                response.read()
+                self.assertEqual(response.status, 404)
 
     def test_webhook_rejects_failed_persistence(self):
         with patch.object(self.jobs, "enqueue", side_effect=sqlite3.OperationalError("full")):
@@ -524,7 +598,7 @@ class WebhookTests(unittest.TestCase):
                     patch.object(service.logging, "debug") as debug:
                 with self.assertRaises(urllib.error.HTTPError) as error:
                     urllib.request.urlopen(url)
-            self.assertEqual(error.exception.code, 501)
+            self.assertEqual(error.exception.code, 404)
             info.assert_not_called()
             self.assertTrue(debug.called)
             self.assertNotIn("do-not-log", str(debug.call_args))

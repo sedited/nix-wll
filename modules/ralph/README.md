@@ -219,6 +219,29 @@ remain retrospective: discussion and web research are not time-filtered.
 A forced review receives a new allowance. Changing prompts does not
 automatically rerun previously reviewed heads.
 
+## Review status images
+
+The HTTP listener serves `GET /assets/<owner>/<repo>/<pr>.png` for the
+configured repository. It returns a 16 by 16 PNG dot, green when the latest
+queued review has completed publication with verified findings or a published
+conceptual concern. Otherwise it returns grey, including unknown PRs, pending
+or failed reviews, and reviews with nothing to say. A new queued generation
+resets the dot to grey until publication completes. Existing saved results
+work immediately; no model calls or backfill are needed.
+
+Forward `/assets/` to Ralph's listener alongside `/webhooks/forgejo`, preserving
+the full path. This endpoint works independently of `reportDir`; the proxy
+does not need access to private state. Responses use `Cache-Control: no-store`,
+though external image proxies may apply their own caching.
+
+For example, with `repository = "bitcoin/bitcoin"` and a host proxying the
+listener at `ralph.example.org`:
+
+```html
+<img src="https://ralph.example.org/assets/bitcoin/bitcoin/123456.png"
+     width="16" height="16" alt="Ralph review status">
+```
+
 ## Minimal configuration
 
 ```nix

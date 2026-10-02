@@ -180,13 +180,13 @@ in
     listenAddress = lib.mkOption {
       type = lib.types.str;
       default = "127.0.0.1";
-      description = "Address for the webhook HTTP server.";
+      description = "Address for the webhook and review badge HTTP server.";
     };
 
     port = lib.mkOption {
       type = lib.types.port;
       default = 8765;
-      description = "Port for the webhook HTTP server.";
+      description = "Port for the webhook and review badge HTTP server.";
     };
 
     stateDir = lib.mkOption {

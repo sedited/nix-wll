@@ -187,6 +187,17 @@ class JobStore:
     def complete(self, job):
         return self._finish(job, "complete")
 
+    def latest_completed_result(self, number):
+        """Return the latest generation's result only after publication."""
+        with self._connection() as db:
+            row = db.execute("""
+                SELECT status, review_result FROM jobs WHERE number = ?
+                ORDER BY generation DESC LIMIT 1
+            """, (number,)).fetchone()
+            if row is None or row["status"] != "complete" or row["review_result"] is None:
+                return None
+            return json.loads(row["review_result"])
+
     def supersede(self, job):
         return self._finish(job, "superseded")
 
