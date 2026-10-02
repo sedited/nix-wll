@@ -308,9 +308,11 @@ def make_handler(secret, jobs, bot_config):
                 self.send_error(503)
                 return
             debug = result.get("debug", {}) if result else {}
-            if result is None or debug.get("skip"):
+            if result is None or debug.get("skip") or "decisions" not in debug:
                 image = badge.GREY
-            elif trace.finding_attribution(debug) or trace.published_concept_concern(debug):
+            elif (any(decision.get("disposition") == "publish"
+                      for decision in debug.get("decisions", []))
+                  or trace.published_concept_concern(debug)):
                 image = badge.ORANGE
             else:
                 image = badge.GREEN

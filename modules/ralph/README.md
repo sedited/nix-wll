@@ -225,7 +225,8 @@ The HTTP listener serves `GET /assets/<owner>/<repo>/<pr>.png` for the
 configured repository. It returns a transparent 16 by 16 PNG dot:
 
 - Grey when no completed review exists for the latest queued generation,
-  including unknown PRs and pending, failed or skipped reviews.
+  including unknown PRs and pending, failed or skipped reviews, or reviews
+  whose verifier produced no publication decisions.
 - Green when the published review has no findings or conceptual concern.
 - Bitcoin orange (`#f7931a`) when the published review has verified findings
   or a conceptual concern.

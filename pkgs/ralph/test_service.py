@@ -126,7 +126,7 @@ class ServiceTests(unittest.TestCase):
         center = 8 * 65 + 1 + 8 * 4
         self.assertEqual(pixels[center:center + 4], bytes((128, 128, 128, 255)))
         job = self.enqueue()
-        self.jobs.save_result(job, {"debug": {"finding_attribution": [{"id": "F1"}]}})
+        self.jobs.save_result(job, {"debug": {"decisions": [{"disposition": "publish", "finding": {"severity": "suggestion"}}]}})
         self.assertEqual(get(), grey)  # Saved but not published.
         self.jobs.complete(job)
         orange = get()
@@ -135,26 +135,30 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(get("/assets/owner/repo/999.png"), grey)
         job = self.enqueue("b" * 40)
         self.assertEqual(get(), grey)  # A new head invalidates the badge.
-        self.jobs.save_result(job, {"debug": {"finding_attribution": []}})
+        self.jobs.save_result(job, {"debug": {"decisions": [{"disposition": "drop", "finding": None}]}})
         self.jobs.complete(job)
         green = get()
         self.assertNotEqual(green, grey)
         self.assertNotEqual(green, orange)
         job = self.enqueue("c" * 40)
-        self.jobs.save_result(job, {"debug": {"concept_assessment": {
+        self.jobs.save_result(job, {"debug": {"decisions": [], "concept_assessment": {
             "status": "verified", "summary": "A material concern.",
             "verification": {"disposition": "publish", "assessment": {
                 "assessment": "rework_approach"}}}}})
         self.jobs.complete(job)
         self.assertEqual(get(), orange)
         job = self.enqueue("d" * 40)
-        self.jobs.save_result(job, {"debug": {"finding_attribution": [{"id": "F1"}]}})
+        self.jobs.save_result(job, {"debug": {"decisions": [{"disposition": "publish", "finding": {"severity": "suggestion"}}]}})
         self.jobs.fail(job, "Publication failed")
         self.assertEqual(get(), grey)
         job = self.enqueue("e" * 40)
         self.jobs.save_result(job, {"debug": {"skip": "Input exceeds limit"}})
         self.jobs.complete(job)
         self.assertEqual(get(), grey)
+        job = self.enqueue("f" * 40)
+        self.jobs.save_result(job, {"debug": {"finding_attribution": []}})
+        self.jobs.complete(job)
+        self.assertEqual(get(), grey)  # Verification did not produce decisions.
         for path in ("/assets/other/repo/42.png", "/assets/owner/repo/0.png",
                      "/assets/owner/repo/42.svg", "/assets/owner/repo/" + "9" * 100 + ".png"):
             with closing(http.client.HTTPConnection("127.0.0.1", server.server_port)) as connection:
