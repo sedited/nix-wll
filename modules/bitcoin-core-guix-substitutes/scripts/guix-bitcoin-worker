@@ -474,6 +474,11 @@ materialize_job() {
         seen_systems[$system]=1
     done
 
+    export GUIX_PACKAGE_PATH=$worktree/guix-package-path
+    mkdir -p "$GUIX_PACKAGE_PATH"
+    ln -sfn "$manifests_dir/toolchains.scm" "$GUIX_PACKAGE_PATH/toolchains.scm"
+    ln -sfn "$manifests_dir/patches" "$GUIX_PACKAGE_PATH/patches"
+
     for system in "${systems[@]}"; do
         (
             set -e
