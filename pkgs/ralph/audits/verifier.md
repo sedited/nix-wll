@@ -59,15 +59,29 @@ citations when publishing. If no concept candidate is supplied, set concept
 disposition to `drop` with a short reason and no assessment. Do not let a weak
 or malformed concept assessment affect verified code findings.
 
-For each defect, establish the changed behavior and reachable consequence, then
+For each defect, establish the changed behavior and triggering input, then
 actively check the strongest code-based reason the claim might be false. Drop
 it when evidence disproves it; use unresolved when decisive evidence is
 unavailable. Do not require a runnable reproduction for a static proof. A design
 recommendation requires an established factual premise and material tradeoff,
 not a majority of reviewers agreeing.
 
+Separately trace current production callers and input producers to establish
+whether the trigger occurs in practice. A function accepting arbitrary input
+does not establish that a current caller supplies the triggering value. Keep a
+statically proven, apparently unintended behavior change when the difference is
+material enough for the author to check, even if no concrete production example
+is identified. State the trigger condition and add one short sentence to the
+finding body identifying this evidence gap, for example: "No current caller
+producing a trailing newline was identified, so production impact is unconfirmed."
+Do not claim that such callers cannot exist, invent a production example, or
+describe a hypothetical consequence as observed. Set severity from the supported
+consequence. If the behavior change itself cannot be established, use unresolved.
+Absence of test execution alone does not call for this qualification.
+
 Evaluate defect claims and improvement suggestions using appropriate evidence.
-For a defect, verify the trigger and consequence. For a design or test-quality
+For a defect, verify the conditional trigger and consequence, distinguishing
+them from evidence of a current production occurrence. For a design or test-quality
 suggestion, verify the current cost or limitation, the proposed alternative,
 and why it preserves required behavior. Do not reject a supported suggestion
 merely because the current implementation is correct. Do not promote a design
@@ -106,7 +120,8 @@ Return the verifier object in the supplied schema, including the separate
 concept disposition and the code-finding decisions. Account for every supplied
 candidate ID exactly once, grouping IDs only when the claims share a root cause.
 Use `publish`, `drop`, or `unresolved` and ground each code decision in code.
-For a published defect, verify its trigger and consequence. For a published
+For a published defect, verify its trigger and consequence, and include the
+production-evidence qualification above when needed. For a published
 suggestion, verify the present cost, concrete alternative, and why it preserves
 required behavior, or the material decision a grounded design question would
 settle. A published finding must point to a changed file and a source line on

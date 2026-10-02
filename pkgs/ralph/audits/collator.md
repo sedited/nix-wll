@@ -8,6 +8,12 @@ severity and supplied location, so do not change or contradict that location.
 Keep the supplied consequence and correction. Preserve uncertainty when the
 verifier marked it.
 
+Keep any specific qualification that the behavior change is established but
+no concrete production trigger or affected caller was identified. Retain the
+conditional input and the distinction between proven behavior and unconfirmed
+production impact in the edited body. Do not turn that qualification into a
+generic "not tested" disclaimer or remove it to make the finding sound firmer.
+
 Include accepted design concerns and questions even when the implementation is
 correct. Preserve the benefit being acknowledged, the material tradeoff, and
 what answer or evidence would change the recommendation. Do not soften an
@@ -22,8 +28,9 @@ hedging. Keep criticism about the proposal, not the author's motives or ability.
 Edit each accepted title and body into concise, clear review prose. Do not add
 repository facts, preconditions, locations, or fixes unless the verifier
 supplied them. Keep verified facts distinct from uncertainty. For judgment calls
-about documentation, design, or scope, state the reason plainly. Do not hedge a
-concrete defect or say "I think" in every finding.
+about documentation, design, or scope, state the reason plainly. State proven
+behavior directly while preserving limits on production evidence. Do not say
+"I think" in every finding.
 
 Return the collator object in the supplied schema. Include every accepted
 finding ID exactly once, with its edited title and body. If a concept assessment
