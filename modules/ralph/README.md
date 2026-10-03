@@ -224,12 +224,14 @@ automatically rerun previously reviewed heads.
 The HTTP listener serves `GET /assets/<owner>/<repo>/<pr>.png` for the
 configured repository. It returns a transparent 16 by 16 PNG dot:
 
-- Grey when no completed review exists for the latest queued generation,
-  including unknown PRs and pending, failed or skipped reviews, or reviews
-  whose verifier produced no publication decisions.
-- Green when the published review has no findings or conceptual concern.
+- Grey when there is no published actionable feedback for the latest queued
+  generation, including absent, pending, failed, skipped, partial or empty
+  reviews without findings or a conceptual concern.
 - Bitcoin orange (`#f7931a`) when the published review has verified findings
   or a conceptual concern.
+
+Orange still applies when published feedback comes from a partial review.
+Neither colour indicates approval or a pass/fail verdict.
 
 A new queued generation resets the dot to grey until publication completes.
 Existing saved results work immediately; no model calls or backfill are needed.

@@ -137,9 +137,7 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(get(), grey)  # A new head invalidates the badge.
         self.jobs.save_result(job, {"debug": {"decisions": [{"disposition": "drop", "finding": None}]}})
         self.jobs.complete(job)
-        green = get()
-        self.assertNotEqual(green, grey)
-        self.assertNotEqual(green, orange)
+        self.assertEqual(get(), grey)
         job = self.enqueue("c" * 40)
         self.jobs.save_result(job, {"debug": {"decisions": [], "concept_assessment": {
             "status": "verified", "summary": "A material concern.",

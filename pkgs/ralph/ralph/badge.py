@@ -22,5 +22,4 @@ def _png(color):
 
 
 GREY = _png((128, 128, 128))
-GREEN = _png((46, 160, 67))
 ORANGE = _png((247, 147, 26))

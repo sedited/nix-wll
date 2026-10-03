@@ -41,11 +41,12 @@ Sources: [service.py](ralph/service.py),
 [jobs.py](ralph/jobs.py), [repository.py](ralph/repository.py).
 
 The HTTP listener also serves per-PR PNG status dots at
-`/assets/<owner>/<repo>/<pr>.png`. They are grey when no completed review exists
-for the latest queued generation, green for a published review with no findings
-or conceptual concern, and Bitcoin orange (`#f7931a`) for published feedback.
-Skipped reviews remain grey. Status comes from the existing job store without
-model or Forgejo API calls. See the module documentation for proxy setup.
+`/assets/<owner>/<repo>/<pr>.png`. They are Bitcoin orange (`#f7931a`) when the
+latest queued generation has published findings or a conceptual concern,
+including feedback from partial reviews. All other results are grey. Neither
+colour indicates approval or a pass/fail verdict. Status comes from the existing
+job store without model or Forgejo API calls. See the module documentation for
+proxy setup.
 
 ## Audit selection
 

@@ -315,7 +315,7 @@ def make_handler(secret, jobs, bot_config):
                   or trace.published_concept_concern(debug)):
                 image = badge.ORANGE
             else:
-                image = badge.GREEN
+                image = badge.GREY
             self.send_response(200)
             self.send_header("Content-Type", "image/png")
             self.send_header("Content-Length", str(len(image)))
