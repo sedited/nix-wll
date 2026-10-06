@@ -17,6 +17,13 @@ before a task finishes. Check that expected and forbidden events belong to the
 observation window and that the asserted sequence matches the implementation's
 state transitions.
 
+Check that the test input and initial state distinguish the intended behavior
+from a plausible incorrect implementation. Empty, default, or already-processed
+data can make different behaviors produce the same result. For modes, aliases,
+and defaults, consider a wrong mapping or ignored option. Identify the smallest
+valid input and assertion that would expose it, reusing existing fixtures where
+practical.
+
 Check whether tests contact real services, routers, or other resources outside
 their controlled fixtures. Examine sleeps and repeated checks: what event are
 they waiting for, what progress can occur during that interval, and what
