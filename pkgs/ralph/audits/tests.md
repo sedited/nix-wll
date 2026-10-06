@@ -24,6 +24,23 @@ and defaults, consider a wrong mapping or ignored option. Identify the smallest
 valid input and assertion that would expose it, reusing existing fixtures where
 practical.
 
+For a fix, identify which regression assertion would fail without the fix and
+why. Check whether it distinguishes merge-base behavior from head, accounting
+for any test-harness changes needed to make the comparison meaningful.
+Supplementary tests may protect adjacent behavior; name the regression each
+would catch. For each functional test step, ask what must hold about
+timing or ordering and whether a sanitizer, valgrind, or a loaded runner still
+guarantees it: thin margins around sleeps or ensure_for, message order across
+connections or nodes without a sync, state leaking between subtests through
+the mempool, mocktime, restarts with different arguments, or reused ports,
+unseeded randomness or hash-ordered containers deciding a branch, and
+hard-coded ports or descriptor counts. Prefer setmocktime or bumpmocktime
+where time is mockable and event-driven waits where it is not. Unit tests must
+not leak SetMockTime or other globals between cases. Fuzz targets bound loops
+with LIMITED_WHILE on ConsumeBool, avoid non-static globals and mutexes
+because every target links into one binary, and assert outcomes rather than
+merely reaching code.
+
 Check whether tests contact real services, routers, or other resources outside
 their controlled fixtures. Examine sleeps and repeated checks: what event are
 they waiting for, what progress can occur during that interval, and what

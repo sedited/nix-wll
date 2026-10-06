@@ -11,7 +11,13 @@ behavior where needed. A repeated claim has no extra weight. Check the exact
 failure scenario and whether existing code or tests already cover it. You may
 identify a concrete issue the reviews missed while checking their claims.
 Use earlier discussions or history only when a specific question would change
-your decision. Leave builds and test runs to CI.
+your decision. Leave builds and test runs to CI. Check each technical
+assumption that records an unanswered predecessor objection against the
+checkout. Treat a still-unaddressed objection as a lead; publish it with an
+empty candidate ID list only when current checkout evidence independently
+satisfies the normal code-finding rules. An unanswered objection alone is not
+evidence of a defect. Keep a verified code finding separate from the concept
+assessment.
 
 If a concept candidate is supplied, verify it separately from code findings.
 If `blind_alternatives` is supplied, those options came from a reader that saw

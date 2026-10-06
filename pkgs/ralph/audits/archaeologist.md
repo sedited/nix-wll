@@ -33,7 +33,11 @@ Build the concept assessment from the goal, not from the proposed mechanism:
 - For security or correctness claims, name the invariant and say whether the
   code enforces it by construction or by caller discipline.
 - For prior attempts, objections, or related discussions, record why they ended
-  and whether that reason still applies.
+  and whether that reason still applies. For a named predecessor or closed
+  alternative, also list review objections that were never answered there and
+  are not visibly addressed by this patch; record each as a technical
+  assumption with its citation, as a lead for the verifier rather than a
+  finding.
 - Consider materially different approaches and useful splits when they could
   preserve the benefit or remove a cost. Do not fill a quota with minor
   variations, moved calls, or already adopted suggestions.

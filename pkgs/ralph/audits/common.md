@@ -24,6 +24,31 @@ recovery path most likely to disprove the claim. Distinguish new, worsened, and
 pre-existing behavior. Do not report an unchanged pre-existing defect as
 introduced here. Preserve a supported finding even when you cannot propose a
 fix.
+
+Within your assigned responsibility, trace changed behavior through affected
+callers and relevant reads and writes of changed state. Check where the
+required invariant is maintained and identify a reachable failure before
+reporting a defect. Read the whole function around a hunk rather than a search snippet, which hides the
+guard or early return that decides the question.
+
+Treat "refactor" and "no behavior change" as claims to falsify: look for an
+input or prior state that distinguishes base from head. Width or precision
+changes, clamping turned into errors, negatives treated as zero, stricter
+runtime checks, changed help text, and changed fuzz input formats are behavior
+changes until shown otherwise. When changed code disagrees with a comment,
+docstring, help text, or name, establish the intended behavior and explain the
+consequence of the mismatch. The text may describe the intended behavior;
+anchor a finding to the changed code and quote the conflicting text.
+
+For new or changed Assert, Assume, assert, or CHECK_NONFATAL checks, determine
+whether reachable remote input or on-disk data can make the condition false
+after preceding validation. Check the failure behavior of the specific helper
+and whether recovery is required. Assume needs a working fallback; a negated
+Assert in a condition is dead code. Distinguish a documented kernel C API
+caller-precondition violation from failure on valid input. Check size_t arithmetic on the
+32-bit targets, a count() or cast to seconds in a comparison that truncates a
+timeout, and unit-literal products for integer promotion.
+
 For a design or test-quality suggestion, name the current cost or limitation,
 the concrete alternative, and why the required behavior is preserved. For a
 grounded design question, identify the material decision and what evidence or
